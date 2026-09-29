@@ -24,12 +24,34 @@ logging.basicConfig(
 def save_job(
     cur,
     source_id: int,
+    crawl_run_id: int,
+    previous_success_at,
+    crawl_started_at,
     job,
 ):
-
     content_hash = build_content_hash(
         job
     )
+
+    observed_new_after = None
+    observed_new_before = None
+
+    # Providers such as Lever may not give us a trustworthy
+    # employer publication timestamp.
+    #
+    # If this is a job without posted_at, record the interval
+    # in which Jobly first observed it.
+    if (
+        job.posted_at is None
+        and previous_success_at is not None
+    ):
+        observed_new_after = (
+            previous_success_at
+        )
+
+        observed_new_before = (
+            crawl_started_at
+        )
 
     cur.execute(
         """
@@ -48,6 +70,9 @@ def save_job(
             posted_at,
             posted_at_source,
 
+            observed_new_after,
+            observed_new_before,
+
             description_text,
             description_html,
 
@@ -58,19 +83,33 @@ def save_job(
 
             content_hash,
 
-            classification_status
+            classification_status,
+
+            last_seen_crawl_id
         )
 
         VALUES (
             %s, %s,
+
             %s, %s, %s, %s,
+
             %s, %s,
+
             %s, %s,
+
             %s, %s,
+
             %s, %s,
+
+            %s, %s,
+
             %s,
+
             %s,
-            'pending'
+
+            'pending',
+
+            %s
         )
 
         ON CONFLICT (
@@ -108,6 +147,18 @@ def save_job(
                 COALESCE(
                     EXCLUDED.posted_at_source,
                     jobs.posted_at_source
+                ),
+
+            observed_new_after =
+                COALESCE(
+                    jobs.observed_new_after,
+                    EXCLUDED.observed_new_after
+                ),
+
+            observed_new_before =
+                COALESCE(
+                    jobs.observed_new_before,
+                    EXCLUDED.observed_new_before
                 ),
 
             description_text =
@@ -221,10 +272,15 @@ def save_job(
             last_seen_at =
                 NOW(),
 
+            last_seen_crawl_id =
+                EXCLUDED.last_seen_crawl_id,
+
+            removed_at =
+                NULL,
+
             active =
                 TRUE
         """,
-
         (
             source_id,
             job.external_job_id,
@@ -240,6 +296,9 @@ def save_job(
             job.posted_at,
             job.posted_at_source,
 
+            observed_new_after,
+            observed_new_before,
+
             job.description.text,
             job.description.html,
 
@@ -249,8 +308,203 @@ def save_job(
             Jsonb(job.raw),
 
             content_hash,
+
+            crawl_run_id,
         ),
     )
+
+
+def create_crawl_run(
+    conn,
+    source_id: int,
+):
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            INSERT INTO crawl_runs (
+                source_id,
+                status
+            )
+
+            VALUES (
+                %s,
+                'running'
+            )
+
+            RETURNING
+                id,
+                started_at
+            """,
+            (
+                source_id,
+            ),
+        )
+
+        row = cur.fetchone()
+
+    conn.commit()
+
+    return (
+        row[0],
+        row[1],
+    )
+
+
+def mark_missing_jobs_inactive(
+    cur,
+    source_id: int,
+    crawl_run_id: int,
+    previous_job_count,
+    current_job_count: int,
+):
+    # Safety guard:
+    #
+    # If a source previously returned jobs but now suddenly
+    # returns zero, do not immediately close every job.
+    #
+    # Treat that as suspicious and require another successful
+    # crawl before mass-deactivation logic is considered.
+    if (
+        previous_job_count is not None
+        and previous_job_count > 0
+        and current_job_count == 0
+    ):
+        logging.warning(
+            "SKIP DEACTIVATION | "
+            "source_id=%s | "
+            "previous_jobs=%s | "
+            "current_jobs=0",
+            source_id,
+            previous_job_count,
+        )
+
+        return
+
+    cur.execute(
+        """
+        UPDATE jobs
+
+        SET
+            active = FALSE,
+            removed_at = NOW()
+
+        WHERE source_id = %s
+
+          AND active = TRUE
+
+          AND (
+              last_seen_crawl_id IS NULL
+              OR last_seen_crawl_id <> %s
+          )
+        """,
+        (
+            source_id,
+            crawl_run_id,
+        ),
+    )
+
+
+def mark_crawl_success(
+    cur,
+    source_id: int,
+    crawl_run_id: int,
+    job_count: int,
+):
+    cur.execute(
+        """
+        UPDATE sources
+
+        SET
+            last_attempt_at = NOW(),
+            last_crawled_at = NOW(),
+            last_success_at = NOW(),
+            last_job_count = %s,
+
+            consecutive_failures = 0,
+            last_error = NULL
+
+        WHERE id = %s
+        """,
+        (
+            job_count,
+            source_id,
+        ),
+    )
+
+    cur.execute(
+        """
+        UPDATE crawl_runs
+
+        SET
+            status = 'success',
+            finished_at = NOW(),
+            job_count = %s,
+            error = NULL
+
+        WHERE id = %s
+        """,
+        (
+            job_count,
+            crawl_run_id,
+        ),
+    )
+
+
+def mark_crawl_failed(
+    conn,
+    source_id: int,
+    crawl_run_id: int,
+    error: Exception,
+):
+    error_message = str(error)
+
+    if len(error_message) > 2000:
+        error_message = (
+            error_message[:2000]
+        )
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            UPDATE sources
+
+            SET
+                last_attempt_at = NOW(),
+                last_failure_at = NOW(),
+
+                consecutive_failures =
+                    consecutive_failures + 1,
+
+                last_error = %s
+
+            WHERE id = %s
+            """,
+            (
+                error_message,
+                source_id,
+            ),
+        )
+
+        cur.execute(
+            """
+            UPDATE crawl_runs
+
+            SET
+                status = 'failed',
+                finished_at = NOW(),
+                error = %s
+
+            WHERE id = %s
+            """,
+            (
+                error_message,
+                crawl_run_id,
+            ),
+        )
+
+    conn.commit()
 
 
 def main():
@@ -259,14 +513,16 @@ def main():
 
         with conn.cursor() as cur:
 
-            # Intentionally use the same first
-            # 50 sources during early development.
+            # Intentionally crawl the same first
+            # 50 active sources during early development.
             cur.execute(
                 """
                 SELECT
                     id,
                     provider,
-                    canonical_url
+                    canonical_url,
+                    last_success_at,
+                    last_job_count
 
                 FROM sources
 
@@ -294,6 +550,16 @@ def main():
             provider = source[1]
             career_url = source[2]
 
+            previous_success_at = (
+                source[3]
+            )
+
+            previous_job_count = (
+                source[4]
+            )
+
+            crawl_run_id = None
+
             logging.info(
                 "[%s/%s] START | %s | %s",
                 index,
@@ -303,6 +569,14 @@ def main():
             )
 
             try:
+
+                (
+                    crawl_run_id,
+                    crawl_started_at,
+                ) = create_crawl_run(
+                    conn,
+                    source_id,
+                )
 
                 jobs = crawl_source(
                     provider,
@@ -316,25 +590,25 @@ def main():
                         save_job(
                             cur,
                             source_id,
+                            crawl_run_id,
+                            previous_success_at,
+                            crawl_started_at,
                             job,
                         )
 
-                    cur.execute(
-                        """
-                        UPDATE sources
+                    mark_missing_jobs_inactive(
+                        cur,
+                        source_id,
+                        crawl_run_id,
+                        previous_job_count,
+                        len(jobs),
+                    )
 
-                        SET
-                            last_crawled_at = NOW(),
-                            last_success_at = NOW(),
-                            last_job_count = %s
-
-                        WHERE id = %s
-                        """,
-
-                        (
-                            len(jobs),
-                            source_id,
-                        ),
+                    mark_crawl_success(
+                        cur,
+                        source_id,
+                        crawl_run_id,
+                        len(jobs),
                     )
 
                 conn.commit()
@@ -348,9 +622,32 @@ def main():
                     len(jobs),
                 )
 
-            except Exception:
+            except Exception as exc:
 
                 conn.rollback()
+
+                if crawl_run_id is not None:
+
+                    try:
+                        mark_crawl_failed(
+                            conn,
+                            source_id,
+                            crawl_run_id,
+                            exc,
+                        )
+
+                    except Exception:
+
+                        conn.rollback()
+
+                        logging.exception(
+                            "FAILED TO RECORD "
+                            "CRAWL FAILURE | "
+                            "source_id=%s | "
+                            "crawl_run_id=%s",
+                            source_id,
+                            crawl_run_id,
+                        )
 
                 logging.exception(
                     "[%s/%s] FAILED | "

@@ -30,6 +30,8 @@ def normalize_greenhouse(raw: dict) -> Job:
 
         posted_at=raw.get("first_published"),
         posted_at_source="greenhouse.first_published",
+        posted_at_confidence="verified",
+        posted_at_precision="exact",
 
         description=greenhouse_description(
             raw.get("content")

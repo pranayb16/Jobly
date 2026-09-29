@@ -1,6 +1,6 @@
 # crawlers/adapters/greenhouse.py
 
-import requests
+from crawlers.http_client import get_json
 from urllib.parse import urlparse
 
 from crawlers.models import Job
@@ -15,10 +15,7 @@ def fetch_greenhouse_jobs(career_url: str) -> list[Job]:
         f"{board_token}/jobs?content=true"
     )
 
-    response = requests.get(api_url, timeout=20)
-    response.raise_for_status()
-
-    data = response.json()
+    data = get_json(api_url)
 
     return [
         normalize_greenhouse(raw_job)

@@ -14,6 +14,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" data-scroll-behavior="smooth">
+      <head><script dangerouslySetInnerHTML={{ __html: `try{var t=localStorage.getItem('jobly:theme');document.documentElement.dataset.theme=t||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}` }} /></head>
       <body>
         <div className="app-shell">
           <Header />

@@ -1,10 +1,10 @@
 import csv
+import logging
 
-from crawlers.adapters.greenhouse import fetch_greenhouse_jobs
 from crawlers.adapters.ashby import fetch_ashby_jobs
+from crawlers.adapters.greenhouse import fetch_greenhouse_jobs
 from crawlers.adapters.lever import fetch_lever_jobs
 
-import logging
 
 logging.basicConfig(
     filename="crawler.log",
@@ -14,7 +14,7 @@ logging.basicConfig(
 
 
 def crawl_source(provider: str, career_url: str):
-    provider = provider.lower()
+    provider = provider.strip().lower()
 
     if provider == "greenhouse":
         return fetch_greenhouse_jobs(career_url)
@@ -25,11 +25,17 @@ def crawl_source(provider: str, career_url: str):
     if provider == "lever":
         return fetch_lever_jobs(career_url)
 
-    raise ValueError(f"Unsupported provider: {provider}")
+    raise ValueError(
+        f"Unsupported provider: {provider}"
+    )
 
 
 def load_sources(path: str) -> list[dict]:
-    with open(path, newline="", encoding="utf-8") as file:
+    with open(
+        path,
+        newline="",
+        encoding="utf-8",
+    ) as file:
         return list(csv.DictReader(file))
 
 
@@ -42,29 +48,45 @@ def run():
 
     print(f"Loaded {len(sources)} sources")
 
-    for index, source in enumerate(sources, start=1):
-        for source in sources:
-            provider = source["ats_platform"]
-            career_url = source["canonical_url"]
+    for index, source in enumerate(
+        sources,
+        start=1,
+    ):
+        provider = source["ats_platform"]
+        career_url = source["canonical_url"]
 
-            logging.info(
-                f"START | {provider} | {career_url}"
+        logging.info(
+            "[%s/%s] START | %s | %s",
+            index,
+            len(sources),
+            provider,
+            career_url,
+        )
+
+        try:
+            jobs = crawl_source(
+                provider,
+                career_url,
             )
 
-            try:
-                jobs = crawl_source(
-                    provider,
-                    career_url,
-                )
+            all_jobs.extend(jobs)
 
-                logging.info(
-                    f"SUCCESS | {provider} | {career_url} | jobs={len(jobs)}"
-                )
+            logging.info(
+                "[%s/%s] SUCCESS | %s | jobs=%s",
+                index,
+                len(sources),
+                provider,
+                len(jobs),
+            )
 
-            except Exception as e:
-                logging.error(
-                    f"FAILED | {provider} | {career_url} | error={e}"
-                )
+        except Exception:
+            logging.exception(
+                "[%s/%s] FAILED | %s | %s",
+                index,
+                len(sources),
+                provider,
+                career_url,
+            )
 
     print()
     print("Finished")

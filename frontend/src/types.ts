@@ -20,6 +20,25 @@ export type Job = {
 
   jobUrl: string;
   applyUrl: string;
+
+  jobFamily: string;
+  jobSubfamily: string;
+  relatedRoles: string[];
+  skills: string[];
+  seniority: string;
+  yearsExperienceMin: number | null;
+  yearsExperienceMax: number | null;
+  aiLocations: AiLocation[];
+  classificationConfidence: number | null;
+};
+
+export type AiLocation = {
+  city: string | null;
+  state: string | null;
+  stateCode: string | null;
+  country: string | null;
+  countryCode: string | null;
+  remote: boolean;
 };
 
 export type JobsResponse = {

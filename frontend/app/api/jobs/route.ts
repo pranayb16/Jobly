@@ -20,6 +20,22 @@ function numberOrNull(value: unknown) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function stringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function locations(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is JobRow => typeof item === 'object' && item !== null).map((item) => ({
+    city: item.city ? String(item.city) : null,
+    state: item.state ? String(item.state) : null,
+    stateCode: item.state_code ? String(item.state_code) : null,
+    country: item.country ? String(item.country) : null,
+    countryCode: item.country_code ? String(item.country_code) : null,
+    remote: Boolean(item.remote),
+  }));
+}
+
 function decodeDisplayValue(value: unknown, fallback: string) {
   const text = String(value ?? fallback);
   try {
@@ -45,6 +61,15 @@ function normalizeJob(row: JobRow, index: number) {
     provider: String(first(row, ['provider', 'source'], '')),
     jobUrl: String(first(row, ['job_url', 'url'], '')),
     applyUrl: String(first(row, ['apply_url', 'application_url'], '')),
+    jobFamily: String(first(row, ['job_family'], '')),
+    jobSubfamily: String(first(row, ['job_subfamily'], '')),
+    relatedRoles: stringArray(first(row, ['related_roles'], [])),
+    skills: stringArray(first(row, ['skills'], [])),
+    seniority: String(first(row, ['seniority'], '')),
+    yearsExperienceMin: numberOrNull(first(row, ['years_experience_min'], null)),
+    yearsExperienceMax: numberOrNull(first(row, ['years_experience_max'], null)),
+    aiLocations: locations(first(row, ['ai_locations'], [])),
+    classificationConfidence: numberOrNull(first(row, ['classification_confidence'], null)),
   };
 }
 

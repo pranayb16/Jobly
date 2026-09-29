@@ -7,11 +7,7 @@ from pydantic import (
 )
 
 from crawlers.enrichment.taxonomy import (
-    ALL_SUBFAMILIES,
-    JOB_FAMILIES,
-    RELATED_ROLES,
     SENIORITY_LEVELS,
-    SUBFAMILIES_BY_FAMILY,
 )
 
 
@@ -55,50 +51,84 @@ class JobClassification(BaseModel):
         le=1.0,
     )
 
-    @field_validator("job_family")
+    @field_validator(
+        "job_family",
+        "job_subfamily",
+    )
     @classmethod
-    def validate_family(cls, value: str):
-        if value not in JOB_FAMILIES:
-            raise ValueError(
-                f"Unsupported job family: {value}"
-            )
+    def normalize_category(
+        cls,
+        value: str | None,
+    ):
 
-        return value
+        if value is None:
+            return None
 
-    @field_validator("seniority")
-    @classmethod
-    def validate_seniority(cls, value: str):
-        if value not in SENIORITY_LEVELS:
-            raise ValueError(
-                f"Unsupported seniority: {value}"
-            )
+        value = value.strip().lower()
+
+        value = "_".join(
+            value.replace("-", " ").split()
+        )
 
         return value
 
     @field_validator("related_roles")
     @classmethod
-    def validate_related_roles(
+    def normalize_roles(
         cls,
         values: list[str],
     ):
-        if len(values) > 6:
+
+        if len(values) > 8:
             raise ValueError(
-                "Maximum of 6 related roles"
+                "Maximum of 8 related roles"
             )
 
-        invalid = [
-            role
-            for role in values
-            if role not in RELATED_ROLES
-        ]
+        normalized = []
 
-        if invalid:
-            raise ValueError(
-                f"Unsupported roles: {invalid}"
+        for value in values:
+
+            value = value.strip().lower()
+
+            value = "_".join(
+                value.replace("-", " ").split()
             )
 
-        # Deduplicate while preserving order.
-        return list(dict.fromkeys(values))
+            if value and value not in normalized:
+                normalized.append(value)
+
+        return normalized
+
+    @field_validator("seniority")
+    @classmethod
+    def validate_seniority(
+        cls,
+        value: str,
+    ):
+
+        value = value.strip().lower()
+
+        aliases = {
+            "mid-level": "mid",
+            "mid_level": "mid",
+            "junior": "entry",
+            "entry-level": "entry",
+            "entry_level": "entry",
+            "sr": "senior",
+            "sr.": "senior",
+            "vp": "vp",
+            "vice_president": "vp",
+        }
+
+        value = aliases.get(
+            value,
+            value,
+        )
+
+        if value not in SENIORITY_LEVELS:
+            return "unknown"
+
+        return value
 
     @field_validator("skills")
     @classmethod
@@ -106,6 +136,7 @@ class JobClassification(BaseModel):
         cls,
         values: list[str],
     ):
+
         cleaned = []
 
         for skill in values:
@@ -120,46 +151,18 @@ class JobClassification(BaseModel):
 
         return cleaned
 
-    @model_validator(mode="after")
-    def validate_subfamily(self):
-
-        if self.job_subfamily is None:
-            return self
-
-        if self.job_subfamily not in ALL_SUBFAMILIES:
-            raise ValueError(
-                "Unsupported job subfamily"
-            )
-
-        allowed = SUBFAMILIES_BY_FAMILY.get(
-            self.job_family,
-            [],
-        )
-
-        if self.job_subfamily not in allowed:
-            raise ValueError(
-                (
-                    f"{self.job_subfamily} does not "
-                    f"belong to {self.job_family}"
-                )
-            )
-
-        return self
-
 JOB_CLASSIFICATION_JSON_SCHEMA = {
     "type": "object",
 
     "properties": {
         "job_family": {
-            "type": "string",
-            "enum": JOB_FAMILIES,
-        },
+        "type": "string",
+    },
 
         "job_subfamily": {
             "anyOf": [
                 {
                     "type": "string",
-                    "enum": ALL_SUBFAMILIES,
                 },
                 {
                     "type": "null",
@@ -169,10 +172,12 @@ JOB_CLASSIFICATION_JSON_SCHEMA = {
 
         "related_roles": {
             "type": "array",
+
             "items": {
                 "type": "string",
-                "enum": RELATED_ROLES,
             },
+
+            "maxItems": 8,
         },
 
         "skills": {

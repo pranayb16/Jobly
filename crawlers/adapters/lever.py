@@ -1,6 +1,6 @@
  # crawlers/adapters/lever.py
 
-import requests
+from crawlers.http_client import get_json
 from urllib.parse import urlparse
 
 from crawlers.models import Job
@@ -15,10 +15,7 @@ def fetch_lever_jobs(career_url: str) -> list[Job]:
         f"{site_name}?mode=json"
     )
 
-    response = requests.get(api_url, timeout=20)
-    response.raise_for_status()
-
-    data = response.json()
+    data = get_json(api_url)
 
     return [
         normalize_lever(raw_job, company=site_name)
