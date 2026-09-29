@@ -11,7 +11,7 @@ export function Header() {
   const pathname = usePathname();
   const onJobs = pathname === '/jobs';
 
-  useEffect(() => { setDark(document.documentElement.dataset.theme === 'dark'); }, []);
+  useEffect(() => { const stored = localStorage.getItem('jobly:theme'); const next = stored ? stored === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches; setDark(next); document.documentElement.dataset.theme = next ? 'dark' : 'light'; }, []);
   const toggleTheme = () => { const next = !dark; setDark(next); document.documentElement.dataset.theme = next ? 'dark' : 'light'; localStorage.setItem('jobly:theme', next ? 'dark' : 'light'); };
 
   return (

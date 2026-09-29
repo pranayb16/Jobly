@@ -31,7 +31,6 @@ MAX_ATTEMPTS = int(
 
 logging.basicConfig(
     level=logging.INFO,
-
     format=(
         "%(asctime)s | "
         "%(levelname)s | "
@@ -42,9 +41,8 @@ logging.basicConfig(
 
 def recover_stale_jobs(conn):
     """
-    If the worker dies while processing a job,
-    don't leave that job stuck in 'processing'
-    forever.
+    Recover jobs left in processing state
+    if a worker crashed or was killed.
     """
 
     with conn.cursor() as cur:
@@ -61,7 +59,8 @@ def recover_stale_jobs(conn):
                         ELSE 'pending'
                     END,
 
-                classification_started_at = NULL,
+                classification_started_at =
+                    NULL,
 
                 classification_error =
                     COALESCE(
@@ -70,7 +69,11 @@ def recover_stale_jobs(conn):
                     )
 
             WHERE
-                classification_status = 'processing'
+                classification_status =
+                    'processing'
+
+                AND classification_started_at
+                    IS NOT NULL
 
                 AND classification_started_at
                     < NOW()
@@ -84,12 +87,58 @@ def recover_stale_jobs(conn):
     conn.commit()
 
 
+def count_pending_fresh_jobs(conn):
+    """
+    Count jobs eligible for AI processing.
+
+    Only jobs that are:
+    - active
+    - have a real posted_at
+    - posted within the last 48 hours
+    - pending classification
+    - below retry limit
+    """
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM jobs
+
+            WHERE
+                active = TRUE
+
+                AND posted_at IS NOT NULL
+
+                AND posted_at >=
+                    NOW() - INTERVAL '48 hours'
+
+                AND content_hash IS NOT NULL
+
+                AND classification_status =
+                    'pending'
+
+                AND classification_attempts < %s
+            """,
+            (
+                MAX_ATTEMPTS,
+            ),
+        )
+
+        row = cur.fetchone()
+
+    return row[0]
+
+
 def claim_next_job(conn):
     """
-    Atomically claim one pending job.
+    Atomically claim one fresh pending job.
 
-    SKIP LOCKED lets multiple workers run
-    later without processing the same job.
+    FOR UPDATE SKIP LOCKED allows multiple
+    workers to run later without processing
+    the same job.
     """
 
     with conn.cursor(
@@ -109,6 +158,9 @@ def claim_next_job(conn):
                 employment_type,
                 workplace_type,
 
+                posted_at,
+                posted_at_source,
+
                 description_text,
                 raw_payload,
 
@@ -121,6 +173,11 @@ def claim_next_job(conn):
             WHERE
                 active = TRUE
 
+                AND posted_at IS NOT NULL
+
+                AND posted_at >=
+                    NOW() - INTERVAL '48 hours'
+
                 AND content_hash IS NOT NULL
 
                 AND classification_status =
@@ -130,7 +187,7 @@ def claim_next_job(conn):
                     < %s
 
             ORDER BY
-                posted_at DESC NULLS LAST,
+                posted_at DESC,
                 id DESC
 
             FOR UPDATE
@@ -147,6 +204,7 @@ def claim_next_job(conn):
 
         if job is None:
             conn.commit()
+
             return None
 
         cur.execute(
@@ -173,9 +231,51 @@ def claim_next_job(conn):
             ),
         )
 
+        job[
+            "classification_attempts"
+        ] += 1
+
     conn.commit()
 
     return job
+
+
+def reset_changed_job(
+    conn,
+    job_id: int,
+):
+    """
+    The job changed while AI was processing it.
+
+    Put the current database version back into
+    pending state so the worker can classify
+    the new content.
+    """
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            UPDATE jobs
+
+            SET
+                classification_status =
+                    'pending',
+
+                classification_started_at =
+                    NULL,
+
+                classification_error =
+                    'job_changed_during_classification'
+
+            WHERE id = %s
+            """,
+            (
+                job_id,
+            ),
+        )
+
+    conn.commit()
 
 
 def save_success(
@@ -184,9 +284,9 @@ def save_success(
     classification,
 ):
     """
-    Save classification only if the job
-    has NOT changed while Gemini was
-    processing it.
+    Store AI classification only when the
+    job content is still identical to what
+    the AI classified.
     """
 
     locations = [
@@ -218,7 +318,8 @@ def save_success(
 
                 ai_locations = %s,
 
-                classification_confidence = %s,
+                classification_confidence =
+                    %s,
 
                 classification_status =
                     'ready',
@@ -262,7 +363,9 @@ def save_success(
 
                 classification.years_experience_max,
 
-                Jsonb(locations),
+                Jsonb(
+                    locations
+                ),
 
                 classification.confidence,
 
@@ -274,17 +377,26 @@ def save_success(
             ),
         )
 
-        updated_rows = cur.rowcount
+        updated_rows = (
+            cur.rowcount
+        )
 
     conn.commit()
 
     if updated_rows == 0:
+
         logging.warning(
             (
-                "STALE RESULT | job=%s | "
+                "STALE RESULT | "
+                "job=%s | "
                 "job changed while AI "
                 "was processing it"
             ),
+            job["id"],
+        )
+
+        reset_changed_job(
+            conn,
             job["id"],
         )
 
@@ -299,11 +411,13 @@ def save_failure(
     error: Exception,
 ):
     """
-    Retry until MAX_ATTEMPTS.
-    After that mark as failed.
+    Retry failed AI processing until
+    MAX_ATTEMPTS has been reached.
     """
 
-    error_message = str(error)[:2000]
+    error_message = (
+        str(error)[:2000]
+    )
 
     with conn.cursor() as cur:
 
@@ -354,18 +468,30 @@ def process_job(
     conn,
     job: dict,
 ):
-    payload = build_classifier_payload(
-        job
+    payload = (
+        build_classifier_payload(
+            job
+        )
     )
 
     logging.info(
-        "CLASSIFY | id=%s | %s",
+        (
+            "CLASSIFY | "
+            "id=%s | "
+            "provider=%s | "
+            "posted_at=%s | "
+            "title=%s"
+        ),
         job["id"],
+        job["provider"],
+        job["posted_at"],
         job["title"],
     )
 
-    classification = classify_job(
-        payload
+    classification = (
+        classify_job(
+            payload
+        )
     )
 
     saved = save_success(
@@ -375,16 +501,18 @@ def process_job(
     )
 
     if not saved:
-        return
+        return False
 
     logging.info(
         (
-            "READY | id=%s | "
+            "READY | "
+            "id=%s | "
             "family=%s | "
             "subfamily=%s | "
             "seniority=%s | "
             "confidence=%.2f"
         ),
+
         job["id"],
 
         classification.job_family,
@@ -396,6 +524,8 @@ def process_job(
         classification.confidence,
     )
 
+    return True
+
 
 def main():
 
@@ -406,14 +536,21 @@ def main():
         type=int,
         default=10,
         help=(
-            "Maximum number of jobs "
-            "to classify during this run"
+            "Maximum number of fresh "
+            "jobs to classify this run"
         ),
     )
 
     args = parser.parse_args()
 
+    if args.limit < 1:
+        raise ValueError(
+            "--limit must be at least 1"
+        )
+
     processed = 0
+    successful = 0
+    failed = 0
 
     with get_connection() as conn:
 
@@ -421,26 +558,54 @@ def main():
             conn
         )
 
-        while processed < args.limit:
+        pending_count = (
+            count_pending_fresh_jobs(
+                conn
+            )
+        )
+
+        logging.info(
+            (
+                "FRESH PENDING JOBS | "
+                "count=%s"
+            ),
+            pending_count,
+        )
+
+        print(
+            "Fresh pending jobs:",
+            pending_count,
+        )
+
+        while (
+            processed < args.limit
+        ):
 
             job = claim_next_job(
                 conn
             )
 
             if job is None:
+
                 logging.info(
-                    "No pending jobs"
+                    "No fresh pending jobs"
                 )
+
                 break
 
             try:
 
-                process_job(
+                success = process_job(
                     conn,
                     job,
                 )
 
+                if success:
+                    successful += 1
+
             except Exception as exc:
+
+                failed += 1
 
                 logging.exception(
                     "FAILED | id=%s",
@@ -456,8 +621,29 @@ def main():
             processed += 1
 
     logging.info(
-        "WORKER COMPLETE | processed=%s",
+        (
+            "WORKER COMPLETE | "
+            "processed=%s | "
+            "successful=%s | "
+            "failed=%s"
+        ),
         processed,
+        successful,
+        failed,
+    )
+
+    print()
+    print(
+        "Processed:",
+        processed,
+    )
+    print(
+        "Successful:",
+        successful,
+    )
+    print(
+        "Failed:",
+        failed,
     )
 
 

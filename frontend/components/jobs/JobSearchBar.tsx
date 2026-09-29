@@ -1,0 +1,5 @@
+import { MapPin, Search } from 'lucide-react';
+
+export function JobSearchBar({ query, location, onQuery, onLocation, onSearch }: { query: string; location: string; onQuery: (value: string) => void; onLocation: (value: string) => void; onSearch: () => void }) {
+  return <section className="jobs-search-v2"><div className="shell jobs-search-inner-v2"><div className="search-field-v2 primary"><Search size={18} /><input value={query} onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') onSearch(); }} placeholder="Job title, keyword, skill, or company" aria-label="Job title, keyword, skill, or company" /></div><div className="search-field-v2"><MapPin size={18} /><input value={location} onChange={(event) => onLocation(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') onSearch(); }} placeholder="City, state, or remote" aria-label="Location" /></div><button onClick={onSearch}><Search size={17} /> Search jobs</button></div><div className="shell search-subline-v2"><span><i /> Every listing is verified within the last 48 hours</span></div></section>;
+}

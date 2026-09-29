@@ -1,101 +1,164 @@
 'use client';
 
-import { ArrowUpRight, Bookmark, BriefcaseBusiness, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Database, EyeOff, MapPin, Search, SlidersHorizontal, Sparkles, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Database, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { Job } from '@/src/types';
+import { ActiveFilters } from './jobs/ActiveFilters';
+import { JobCard } from './jobs/JobCard';
+import { JobDetail } from './jobs/JobDetail';
+import { JobFilterToolbar } from './jobs/JobFilterToolbar';
+import { JobSearchBar } from './jobs/JobSearchBar';
+import { JobsToolbar } from './jobs/JobsToolbar';
+import { MobileFilterDrawer } from './jobs/MobileFilterDrawer';
+import { allLocations, arrayValues, hoursOld, jobLocations, label, values } from './jobs/helpers';
+import { FILTER_GROUP_ORDER } from './jobs/types';
+import type { ActiveFilterGroup, FilterDefinition, FilterKey, Filters, Sort } from './jobs/types';
 
-type Filters = { location: string; company: string; source: string; employment: string; workplace: string; family: string; subfamily: string; skill: string; seniority: string; experience: string };
-type Sort = 'newest' | 'oldest' | 'company';
-const defaults: Filters = { location: '', company: '', source: '', employment: '', workplace: '', family: '', subfamily: '', skill: '', seniority: '', experience: '' };
-const label = (value: string) => value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
-const hoursOld = (value: string | null) => value ? Math.max(0, (Date.now() - new Date(value).getTime()) / 3_600_000) : Infinity;
-const ago = (value: string | null) => { const mins = Math.floor(hoursOld(value) * 60); return !Number.isFinite(mins) ? 'Recently' : mins < 1 ? 'Just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ago`; };
-const exact = (value: string | null) => value ? new Date(value).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '';
-const values = (jobs: Job[], key: keyof Job) => Array.from(new Set(jobs.map((j) => String(j[key] || '')).filter(Boolean))).sort();
-const arrayValues = (jobs: Job[], key: 'skills' | 'relatedRoles') => Array.from(new Set(jobs.flatMap((j) => j[key]))).sort();
-const aiLocationLabel = (location: Job['aiLocations'][number]) => location.remote ? 'Remote' : [location.city, location.stateCode || location.state, location.countryCode].filter(Boolean).join(', ');
-const jobLocations = (job: Job) => Array.from(new Set([job.location, ...job.aiLocations.map(aiLocationLabel)].filter(Boolean)));
-const allLocations = (jobs: Job[]) => Array.from(new Set(jobs.flatMap(jobLocations))).sort();
+const defaults = (): Filters => ({ datePosted: [], location: [], workplace: [], role: [], experience: [], employment: [], skill: [], company: [], source: [] });
+const filterLabels: Record<FilterKey, string> = { datePosted: 'Date posted', location: 'Location', workplace: 'Workplace', role: 'Role', experience: 'Experience', employment: 'Job type', skill: 'Skills', company: 'Company', source: 'Source' };
 const storageKey = (kind: string) => `jobly:${kind}`;
 const readIds = (kind: string) => { try { return new Set<string>(JSON.parse(localStorage.getItem(storageKey(kind)) || '[]')); } catch { return new Set<string>(); } };
-function companyMark(company: string) { const colors = ['#335c67', '#6b705c', '#725a7a', '#8a5d52', '#426a5a']; return { background: colors[[...company].reduce((n, c) => n + c.charCodeAt(0), 0) % colors.length] }; }
+const readInitialFilters = (params: URLSearchParams): Filters => {
+  const role = [...params.getAll('role'), ...params.getAll('family').map((value) => `family:${value}`), ...params.getAll('subfamily').map((value) => `subfamily:${value}`)];
+  const experience = [...params.getAll('experience').map((value) => value.includes(':') ? value : `years:${value}`), ...params.getAll('seniority').map((value) => `seniority:${value}`)];
+  return {
+    datePosted: params.getAll('datePosted'),
+    location: params.getAll('location'),
+    workplace: params.getAll('workplace'),
+    role,
+    experience,
+    employment: params.getAll('employment'),
+    skill: params.getAll('skill').map((value) => value.toLocaleLowerCase()),
+    company: params.getAll('company'),
+    source: params.getAll('source'),
+  };
+};
 
-function FilterSelect({ icon, title, value, onChange, children }: { icon?: React.ReactNode; title: string; value: string | number; onChange: (value: string) => void; children: React.ReactNode }) {
-  return <label className={value && value !== 48 ? 'filter-block active' : 'filter-block'}><span>{icon}{title}</span><div><select value={value} onChange={(e) => onChange(e.target.value)}>{children}</select><ChevronDown size={14} /></div></label>;
-}
-
-function FilterRail({ jobs, filters, setFilter, savedOnly, setSavedOnly, clear }: { jobs: Job[]; filters: Filters; setFilter: (key: keyof Filters, value: string | number) => void; savedOnly: boolean; setSavedOnly: (v: boolean) => void; clear: () => void }) {
-  const active = Object.values(filters).filter(Boolean).length + Number(savedOnly);
-  return <div className="filter-rail-inner"><div className="rail-heading"><div><SlidersHorizontal size={16} /><strong>Refine results</strong>{active > 0 && <b>{active}</b>}</div>{active > 0 && <button onClick={clear}>Clear</button>}</div>
-    <button className={savedOnly ? 'saved-filter active' : 'saved-filter'} onClick={() => setSavedOnly(!savedOnly)}><Bookmark size={15} /> Saved jobs</button>
-    <div className="filter-section-label">Role</div>
-    <FilterSelect title="Job family" value={filters.family} onChange={(v) => setFilter('family', v)}><option value="">All job families</option>{values(jobs, 'jobFamily').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <FilterSelect title="Specialization" value={filters.subfamily} onChange={(v) => setFilter('subfamily', v)}><option value="">All specializations</option>{values(jobs, 'jobSubfamily').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <FilterSelect title="Skill" value={filters.skill} onChange={(v) => setFilter('skill', v)}><option value="">Any skill</option>{arrayValues(jobs, 'skills').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <div className="filter-section-label">Level &amp; setup</div>
-    <FilterSelect title="Seniority" value={filters.seniority} onChange={(v) => setFilter('seniority', v)}><option value="">Any seniority</option>{values(jobs, 'seniority').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <FilterSelect title="Experience" value={filters.experience} onChange={(v) => setFilter('experience', v)}><option value="">Any experience</option><option value="entry">0–2 years</option><option value="mid">3–5 years</option><option value="senior">6+ years</option></FilterSelect>
-    <FilterSelect title="Work environment" value={filters.workplace} onChange={(v) => setFilter('workplace', v)}><option value="">Remote, hybrid or onsite</option>{values(jobs, 'workplaceType').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <FilterSelect title="Employment type" icon={<BriefcaseBusiness size={14} />} value={filters.employment} onChange={(v) => setFilter('employment', v)}><option value="">All commitments</option>{values(jobs, 'employmentType').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <FilterSelect title="Location" icon={<MapPin size={14} />} value={filters.location} onChange={(v) => setFilter('location', v)}><option value="">Everywhere</option>{allLocations(jobs).map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <FilterSelect title="Company" icon={<Building2 size={14} />} value={filters.company} onChange={(v) => setFilter('company', v)}><option value="">All companies</option>{values(jobs, 'company').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
-    <FilterSelect title="Job source" icon={<Database size={14} />} value={filters.source} onChange={(v) => setFilter('source', v)}><option value="">All sources</option>{values(jobs, 'provider').map((v) => <option key={v}>{label(v)}</option>)}</FilterSelect>
-    <div className="rail-note"><Sparkles size={15} /><p><strong>AI-normalized fields.</strong> Role families, skills, levels, and locations are standardized across every job source.</p></div>
-  </div>;
-}
-
-function CompactSelect({ value, onChange, title, children }: { value: string | number; onChange: (value: string) => void; title: string; children: React.ReactNode }) {
-  return <label className={value && value !== 48 ? 'compact-filter active' : 'compact-filter'}><span>{title}</span><select value={value} onChange={(event) => onChange(event.target.value)}>{children}</select><ChevronDown size={12} /></label>;
-}
-
-function FilterGroup({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
-  return <details className={count > 0 ? 'filter-popover has-active' : 'filter-popover'}><summary><span>{title}</span>{count > 0 && <b>{count}</b>}<ChevronDown size={15} /></summary><div className="filter-popover-panel">{children}</div></details>;
-}
-
-function GroupedFilters({ jobs, filters, setFilter, savedOnly, setSavedOnly, clear }: { jobs: Job[]; filters: Filters; setFilter: (key: keyof Filters, value: string | number) => void; savedOnly: boolean; setSavedOnly: (v: boolean) => void; clear: () => void }) {
-  const active = Object.values(filters).filter(Boolean).length + Number(savedOnly);
-  return <div className="grouped-filters"><FilterGroup title="Saved jobs" count={Number(savedOnly)}><button className={savedOnly ? 'compact-saved active' : 'compact-saved'} onClick={() => setSavedOnly(!savedOnly)}><Bookmark size={15} /> {savedOnly ? 'Showing saved jobs' : 'Show saved jobs'}</button></FilterGroup>
-    <FilterGroup title="Role" count={[filters.family, filters.subfamily, filters.skill].filter(Boolean).length}><CompactSelect title="Job family" value={filters.family} onChange={(value) => setFilter('family', value)}><option value="">All families</option>{values(jobs, 'jobFamily').map((value) => <option key={value}>{value}</option>)}</CompactSelect><CompactSelect title="Specialization" value={filters.subfamily} onChange={(value) => setFilter('subfamily', value)}><option value="">All specializations</option>{values(jobs, 'jobSubfamily').map((value) => <option key={value}>{value}</option>)}</CompactSelect><CompactSelect title="Required skill" value={filters.skill} onChange={(value) => setFilter('skill', value)}><option value="">Any skill</option>{arrayValues(jobs, 'skills').map((value) => <option key={value}>{value}</option>)}</CompactSelect></FilterGroup>
-    <FilterGroup title="Level & commitment" count={[filters.seniority, filters.experience, filters.employment].filter(Boolean).length}><CompactSelect title="Seniority" value={filters.seniority} onChange={(value) => setFilter('seniority', value)}><option value="">Any level</option>{values(jobs, 'seniority').map((value) => <option key={value}>{value}</option>)}</CompactSelect><CompactSelect title="Experience" value={filters.experience} onChange={(value) => setFilter('experience', value)}><option value="">Any experience</option><option value="entry">0–2 years</option><option value="mid">3–5 years</option><option value="senior">6+ years</option></CompactSelect><CompactSelect title="Employment type" value={filters.employment} onChange={(value) => setFilter('employment', value)}><option value="">Any type</option>{values(jobs, 'employmentType').map((value) => <option key={value}>{value}</option>)}</CompactSelect></FilterGroup>
-    <FilterGroup title="Workplace" count={[filters.workplace, filters.location].filter(Boolean).length}><CompactSelect title="Work environment" value={filters.workplace} onChange={(value) => setFilter('workplace', value)}><option value="">Any environment</option>{values(jobs, 'workplaceType').map((value) => <option key={value}>{value}</option>)}</CompactSelect><CompactSelect title="Location" value={filters.location} onChange={(value) => setFilter('location', value)}><option value="">Everywhere</option>{allLocations(jobs).map((value) => <option key={value}>{value}</option>)}</CompactSelect></FilterGroup>
-    <FilterGroup title="Company & source" count={[filters.company, filters.source].filter(Boolean).length}><CompactSelect title="Company" value={filters.company} onChange={(value) => setFilter('company', value)}><option value="">All companies</option>{values(jobs, 'company').map((value) => <option key={value}>{value}</option>)}</CompactSelect><CompactSelect title="Job source" value={filters.source} onChange={(value) => setFilter('source', value)}><option value="">All sources</option>{values(jobs, 'provider').map((value) => <option key={value}>{label(value)}</option>)}</CompactSelect></FilterGroup>
-    {active > 0 && <button className="clear-grouped-filters" onClick={clear}>Clear all <span>{active}</span></button>}
-  </div>;
-}
-
-function JobCard({ job, selected, saved, onSelect, onSave, onHide }: { job: Job; selected: boolean; saved: boolean; onSelect: () => void; onSave: () => void; onHide: () => void }) {
-  return <article className={selected ? 'result-card selected' : 'result-card'} onClick={onSelect}><div className="company-mark" style={companyMark(job.company)}>{job.company.slice(0, 1).toUpperCase()}</div><div className="result-copy"><div className="result-topline"><span>{job.company}</span><time title={exact(job.createdAt)}><i />{ago(job.createdAt)}</time></div><h3>{job.title}</h3><div className="result-meta"><span><MapPin size={13} />{job.location || 'Location flexible'}</span>{job.employmentType && <span><BriefcaseBusiness size={13} />{label(job.employmentType)}</span>}{job.workplaceType && <span>{label(job.workplaceType)}</span>}{job.seniority && <span>{label(job.seniority)}</span>}</div>{job.skills.length > 0 && <div className="skill-row">{job.skills.slice(0, 4).map((skill) => <span key={skill}>{skill}</span>)}{job.skills.length > 4 && <small>+{job.skills.length - 4}</small>}</div>}<p>{job.description || 'Open this role to review the full description and requirements.'}</p><div className="result-source"><span>{job.jobFamily ? `${job.jobFamily} · ` : ''}via {label(job.provider || 'company careers')}</span><div><button aria-label={saved ? 'Unsave job' : 'Save job'} onClick={(e) => { e.stopPropagation(); onSave(); }} className={saved ? 'is-saved' : ''}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} /></button><button aria-label="Hide job" onClick={(e) => { e.stopPropagation(); onHide(); }}><EyeOff size={15} /></button></div></div></div></article>;
-}
-
-function DetailPanel({ job, saved, applied, onSave, onApplied, close }: { job: Job; saved: boolean; applied: boolean; onSave: () => void; onApplied: () => void; close: () => void }) {
-  const destination = job.applyUrl || job.jobUrl;
-  const experience = job.yearsExperienceMin === null && job.yearsExperienceMax === null ? 'Not specified' : `${job.yearsExperienceMin ?? 0}${job.yearsExperienceMax !== null ? `–${job.yearsExperienceMax}` : '+'} years`;
-  return <aside className="detail-panel"><button className="detail-close" onClick={close} aria-label="Close job details"><X size={18} /></button><div className="detail-head"><div className="company-mark large" style={companyMark(job.company)}>{job.company.slice(0, 1)}</div><span>{job.company}</span><h2>{job.title}</h2><div className="detail-meta"><span><MapPin size={14} />{jobLocations(job).join(' · ') || 'Location flexible'}</span><span><Clock3 size={14} />Posted {ago(job.createdAt)}</span></div></div><div className="detail-actions">{destination ? <a href={destination} target="_blank" rel="noreferrer" onClick={onApplied}>Apply on company site <ArrowUpRight size={16} /></a> : <button disabled>Apply link unavailable</button>}<button className={saved ? 'saved' : ''} onClick={onSave}><Bookmark size={17} fill={saved ? 'currentColor' : 'none'} />{saved ? 'Saved' : 'Save'}</button></div>{applied && <div className="applied-banner"><Check size={15} /> Marked as applied</div>}<div className="detail-facts"><div><small>Job family</small><strong>{label(job.jobFamily || 'Not specified')}</strong></div><div><small>Specialization</small><strong>{label(job.jobSubfamily || 'Not specified')}</strong></div><div><small>Seniority</small><strong>{label(job.seniority || 'Not specified')}</strong></div><div><small>Experience</small><strong>{experience}</strong></div><div><small>Commitment</small><strong>{label(job.employmentType || 'Not specified')}</strong></div><div><small>Work setting</small><strong>{label(job.workplaceType || 'Not specified')}</strong></div><div><small>Source</small><strong>{label(job.provider || 'Company careers')}</strong></div><div><small>Published</small><strong>{exact(job.createdAt) || 'Recently'}</strong></div></div>{job.skills.length > 0 && <div className="detail-skills"><h3>Skills</h3><div>{job.skills.map((skill) => <span key={skill}>{skill}</span>)}</div></div>}{job.relatedRoles.length > 0 && <div className="related-roles"><strong>Related roles</strong><span>{job.relatedRoles.map(label).join(' · ')}</span></div>}<div className="detail-body"><h3>About this role</h3>{job.description ? job.description.split(/\n+/).filter(Boolean).map((p, i) => <p key={i}>{p}</p>) : <p>The source did not provide a description preview. Open the original listing for full details.</p>}</div>{job.jobUrl && <a className="original-link" href={job.jobUrl} target="_blank" rel="noreferrer">View original listing <ArrowUpRight size={14} /></a>}</aside>;
-}
+const experienceMatch = (job: Job, value: string) => {
+  if (value.startsWith('seniority:')) return job.seniority === value.slice(10);
+  const years = job.yearsExperienceMin ?? 0;
+  return value === 'years:entry' ? years <= 2 : value === 'years:mid' ? years >= 3 && years <= 5 : years >= 6;
+};
 
 export default function JobsPage() {
-  const [jobs, setJobs] = useState<Job[]>([]); const [query, setQuery] = useState(''); const [filters, setFilters] = useState(defaults); const [sort, setSort] = useState<Sort>('newest');
-  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading'); const [error, setError] = useState(''); const [selectedId, setSelectedId] = useState(''); const [filtersOpen, setFiltersOpen] = useState(false);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [filters, setFilters] = useState<Filters>(defaults);
+  const [query, setQuery] = useState('');
+  const [locationQuery, setLocationQuery] = useState('');
+  const [queryDraft, setQueryDraft] = useState('');
+  const [locationDraft, setLocationDraft] = useState('');
+  const [sort, setSort] = useState<Sort>('newest');
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [error, setError] = useState('');
+  const [selectedId, setSelectedId] = useState('');
   const [detailJob, setDetailJob] = useState<Job | null>(null);
-  const [saved, setSaved] = useState<Set<string>>(new Set()); const [hidden, setHidden] = useState<Set<string>>(new Set()); const [applied, setApplied] = useState<Set<string>>(new Set()); const [savedOnly, setSavedOnly] = useState(false);
+  const [saved, setSaved] = useState<Set<string>>(new Set());
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [applied, setApplied] = useState<Set<string>>(new Set());
+  const [savedOnly, setSavedOnly] = useState(false);
+  const [mobileFilters, setMobileFilters] = useState(false);
   const [page, setPage] = useState(1);
-  useEffect(() => { const params = new URLSearchParams(location.search); setQuery(params.get('q') || ''); setSelectedId(params.get('job') || ''); setFilters({ location: params.get('location') || '', company: params.get('company') || '', source: params.get('source') || '', employment: params.get('employment') || '', workplace: params.get('workplace') || '', family: params.get('family') || '', subfamily: params.get('subfamily') || '', skill: params.get('skill') || '', seniority: params.get('seniority') || '', experience: params.get('experience') || '' }); setSaved(readIds('saved')); setHidden(readIds('hidden')); setApplied(readIds('applied')); const c = new AbortController(); fetch('/api/jobs', { signal: c.signal }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).message || 'Unable to load jobs'); return r.json(); }).then((d) => { setJobs(d.jobs); setStatus('ready'); }).catch((e) => { if (e.name !== 'AbortError') { setError(e.message); setStatus('error'); } }); return () => c.abort(); }, []);
-  useEffect(() => { const p = new URLSearchParams(); if (query) p.set('q', query); if (selectedId) p.set('job', selectedId); Object.entries(filters).forEach(([k, v]) => { if (v) p.set(k, String(v)); }); history.replaceState(null, '', `${location.pathname}${p.size ? `?${p}` : ''}`); }, [query, selectedId, filters]);
-  useEffect(() => { if (!selectedId) { setDetailJob(null); return; } const c = new AbortController(); fetch(`/api/jobs/${encodeURIComponent(selectedId)}`, { signal: c.signal }).then((r) => r.ok ? r.json() : Promise.reject()).then(setDetailJob).catch(() => setDetailJob(null)); return () => c.abort(); }, [selectedId]);
+  const [urlHydrated, setUrlHydrated] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const initialQuery = params.get('q') || '';
+    const initialLocation = params.get('near') || '';
+    setQuery(initialQuery); setQueryDraft(initialQuery); setLocationQuery(initialLocation); setLocationDraft(initialLocation);
+    setSelectedId(params.get('job') || '');
+    setSavedOnly(params.get('saved') === 'true');
+    setFilters(readInitialFilters(params));
+    setUrlHydrated(true);
+    setSaved(readIds('saved')); setHidden(readIds('hidden')); setApplied(readIds('applied'));
+    const controller = new AbortController();
+    fetch('/api/jobs', { signal: controller.signal }).then(async (response) => { if (!response.ok) throw new Error((await response.json()).message || 'Unable to load jobs'); return response.json(); }).then((data) => { setJobs(data.jobs); setStatus('ready'); }).catch((reason) => { if (reason.name !== 'AbortError') { setError(reason.message); setStatus('error'); } });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!urlHydrated) return;
+    const params = new URLSearchParams();
+    if (query) params.set('q', query); if (locationQuery) params.set('near', locationQuery); if (selectedId) params.set('job', selectedId); if (savedOnly) params.set('saved', 'true');
+    FILTER_GROUP_ORDER.forEach((key) => filters[key].forEach((value) => params.append(key, value)));
+    history.replaceState(null, '', `${window.location.pathname}${params.size ? `?${params}` : ''}`);
+  }, [query, locationQuery, selectedId, filters, savedOnly, urlHydrated]);
+
+  useEffect(() => {
+    if (!selectedId) { setDetailJob(null); return; }
+    const controller = new AbortController();
+    fetch(`/api/jobs/${encodeURIComponent(selectedId)}`, { signal: controller.signal }).then((response) => response.ok ? response.json() : Promise.reject()).then(setDetailJob).catch(() => setDetailJob(null));
+    return () => controller.abort();
+  }, [selectedId]);
+
   const persist = (kind: string, ids: Set<string>) => { const next = new Set(ids); localStorage.setItem(storageKey(kind), JSON.stringify([...next])); return next; };
-  const toggle = (kind: 'saved' | 'hidden' | 'applied', id: string) => { const current = kind === 'saved' ? saved : kind === 'hidden' ? hidden : applied; const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); const stored = persist(kind, next); if (kind === 'saved') setSaved(stored); else if (kind === 'hidden') setHidden(stored); else setApplied(stored); };
-  const visible = useMemo(() => jobs.filter((j) => { const id = String(j.id); const q = query.toLowerCase().trim(); const experienceMatch = !filters.experience || (filters.experience === 'entry' ? (j.yearsExperienceMin ?? 0) <= 2 : filters.experience === 'mid' ? (j.yearsExperienceMin ?? 0) >= 3 && (j.yearsExperienceMin ?? 0) <= 5 : (j.yearsExperienceMin ?? 0) >= 6); return !hidden.has(id) && (!savedOnly || saved.has(id)) && (!q || [j.title, j.company, ...jobLocations(j), j.description, j.jobFamily, j.jobSubfamily, ...j.skills, ...j.relatedRoles].some((x) => x.toLowerCase().includes(q))) && (!filters.location || jobLocations(j).includes(filters.location)) && (!filters.company || j.company === filters.company) && (!filters.source || label(j.provider) === filters.source || j.provider === filters.source) && (!filters.employment || j.employmentType === filters.employment) && (!filters.workplace || j.workplaceType === filters.workplace) && (!filters.family || j.jobFamily === filters.family) && (!filters.subfamily || j.jobSubfamily === filters.subfamily) && (!filters.skill || j.skills.includes(filters.skill)) && (!filters.seniority || j.seniority === filters.seniority) && experienceMatch; }).sort((a, b) => sort === 'company' ? a.company.localeCompare(b.company) : (new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()) * (sort === 'newest' ? -1 : 1)), [jobs, query, filters, sort, savedOnly, saved, hidden]);
-  const pageSize = 12;
-  const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
-  const pagedJobs = visible.slice((page - 1) * pageSize, page * pageSize);
-  useEffect(() => { setPage(1); }, [query, filters, sort, savedOnly]);
+  const toggleState = (kind: 'saved' | 'hidden' | 'applied', id: string) => { const current = kind === 'saved' ? saved : kind === 'hidden' ? hidden : applied; const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); const stored = persist(kind, next); if (kind === 'saved') setSaved(stored); else if (kind === 'hidden') setHidden(stored); else setApplied(stored); };
+
+  const definitions = useMemo<FilterDefinition[]>(() => {
+    const tally = (test: (job: Job) => boolean) => jobs.filter(test).length;
+    const option = (value: string, text: string, test: (job: Job) => boolean) => ({ value, label: text, count: tally(test) });
+    const skillLabels = new Map<string, string>();
+    arrayValues(jobs, 'skills').forEach((skill) => { const key = skill.toLocaleLowerCase(); if (!skillLabels.has(key)) skillLabels.set(key, skill); });
+    return [
+      { key: 'datePosted', label: 'Date posted', single: true, options: [option('24', 'Last 24 hours', (job) => hoursOld(job.createdAt) <= 24), option('48', 'Last 48 hours', (job) => hoursOld(job.createdAt) <= 48)] },
+      { key: 'location', label: 'Location', searchable: true, options: allLocations(jobs).map((value) => option(value, value, (job) => jobLocations(job).includes(value))) },
+      { key: 'workplace', label: 'Workplace', options: values(jobs, 'workplaceType').map((value) => option(value, label(value), (job) => job.workplaceType === value)) },
+      { key: 'role', label: 'Role', searchable: true, options: [...values(jobs, 'jobFamily').map((value) => option(`family:${value}`, value, (job) => job.jobFamily === value)), ...values(jobs, 'jobSubfamily').map((value) => option(`subfamily:${value}`, value, (job) => job.jobSubfamily === value))] },
+      { key: 'experience', label: 'Experience', options: [...values(jobs, 'seniority').map((value) => option(`seniority:${value}`, label(value), (job) => job.seniority === value)), option('years:entry', '0–2 years', (job) => experienceMatch(job, 'years:entry')), option('years:mid', '3–5 years', (job) => experienceMatch(job, 'years:mid')), option('years:senior', '6+ years', (job) => experienceMatch(job, 'years:senior'))] },
+      { key: 'employment', label: 'Job type', options: values(jobs, 'employmentType').map((value) => option(value, label(value), (job) => job.employmentType === value)) },
+      { key: 'skill', label: 'Skills', searchable: true, options: [...skillLabels].map(([value, text]) => option(value, text, (job) => job.skills.some((skill) => skill.toLocaleLowerCase() === value))) },
+      { key: 'company', label: 'Company', searchable: true, options: values(jobs, 'company').map((value) => option(value, value, (job) => job.company === value)) },
+      { key: 'source', label: 'Source', options: values(jobs, 'provider').map((value) => option(value, label(value), (job) => job.provider === value)) },
+    ];
+  }, [jobs]);
+
+  const optionMaps = useMemo(() => Object.fromEntries(definitions.map((definition) => [definition.key, new Map(definition.options.map((option) => [option.value, option]))])) as Record<FilterKey, Map<string, { value: string; label: string; count?: number }>>, [definitions]);
+
+  const visible = useMemo(() => jobs.filter((job) => {
+    const id = String(job.id); const needle = query.toLowerCase().trim(); const place = locationQuery.toLowerCase().trim();
+    const matches = (key: FilterKey, test: (value: string) => boolean) => !filters[key].length || filters[key].some(test);
+    return !hidden.has(id) && (!savedOnly || saved.has(id))
+      && (!needle || [job.title, job.company, job.description, job.jobFamily, job.jobSubfamily, ...job.skills, ...job.relatedRoles].some((value) => value.toLowerCase().includes(needle)))
+      && (!place || jobLocations(job).some((value) => value.toLowerCase().includes(place)))
+      && matches('datePosted', (value) => hoursOld(job.createdAt) <= Number(value))
+      && matches('location', (value) => jobLocations(job).includes(value))
+      && matches('workplace', (value) => job.workplaceType === value)
+      && matches('role', (value) => value.startsWith('family:') ? job.jobFamily === value.slice(7) : job.jobSubfamily === value.slice(10))
+      && matches('experience', (value) => experienceMatch(job, value))
+      && matches('employment', (value) => job.employmentType === value)
+      && matches('skill', (value) => job.skills.some((skill) => skill.toLocaleLowerCase() === value))
+      && matches('company', (value) => job.company === value)
+      && matches('source', (value) => job.provider === value);
+  }).sort((a, b) => sort === 'company' ? a.company.localeCompare(b.company) : (new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()) * (sort === 'newest' ? -1 : 1)), [jobs, filters, query, locationQuery, sort, savedOnly, saved, hidden]);
+
+  const toggleFilter = (key: FilterKey, value: string, single = false) => setFilters((current) => ({ ...current, [key]: current[key].includes(value) ? current[key].filter((item) => item !== value) : single ? [value] : [...current[key], value] }));
+  const clearCategory = (key: FilterKey) => setFilters((current) => ({ ...current, [key]: [] }));
+  const clearFilters = () => { setFilters(defaults()); setSavedOnly(false); };
+  const clearEverything = () => { clearFilters(); setQuery(''); setQueryDraft(''); setLocationQuery(''); setLocationDraft(''); };
+  const filterCount = FILTER_GROUP_ORDER.reduce((sum, key) => sum + filters[key].length, Number(savedOnly));
+  const activeGroups = useMemo<ActiveFilterGroup[]>(() => {
+    const groups: ActiveFilterGroup[] = FILTER_GROUP_ORDER.flatMap((key) => filters[key].length ? [{ key, label: filterLabels[key], values: filters[key].map((value) => optionMaps[key].get(value) || { value, label: label(value.replace(/^(family|subfamily|seniority|years):/, '')) }) }] : []);
+    if (savedOnly) groups.push({ key: 'saved', label: 'Saved jobs', values: [{ value: 'saved', label: 'Saved only' }] });
+    return groups;
+  }, [filters, optionMaps, savedOnly]);
+
+  const pageSize = 12; const pageCount = Math.max(1, Math.ceil(visible.length / pageSize)); const pagedJobs = visible.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => { setPage(1); }, [query, locationQuery, filters, sort, savedOnly]);
   useEffect(() => { if (page > pageCount) setPage(pageCount); }, [page, pageCount]);
-  const selected = detailJob || jobs.find((j) => String(j.id) === selectedId) || null; const clear = () => { setFilters(defaults); setQuery(''); setSavedOnly(false); };
-  const rail = <FilterRail jobs={jobs} filters={filters} savedOnly={savedOnly} setSavedOnly={setSavedOnly} clear={clear} setFilter={(key, value) => setFilters((f) => ({ ...f, [key]: value }))} />;
-  const grouped = <GroupedFilters jobs={jobs} filters={filters} savedOnly={savedOnly} setSavedOnly={setSavedOnly} clear={clear} setFilter={(key, value) => setFilters((current) => ({ ...current, [key]: value }))} />;
-  return <section className="jobs-workspace"><div className="filter-dock"><div className="shell"><div className="filter-dock-title"><div><span><i />Live</span><strong>Jobs from the last 48 hours</strong></div><button onClick={() => setFiltersOpen(true)}><SlidersHorizontal size={15} /> All filters</button></div>{grouped}</div></div>
-    <div className={selected ? 'workspace-grid top-filter-layout has-detail' : 'workspace-grid top-filter-layout'}><main className="results-column"><div className="results-toolbar"><div><span>Fresh opportunities across every source</span><h1>{status === 'ready' ? `${visible.length.toLocaleString()} ${visible.length === 1 ? 'job' : 'jobs'} at ${new Set(visible.map((job) => job.company)).size.toLocaleString()} ${new Set(visible.map((job) => job.company)).size === 1 ? 'company' : 'companies'}` : 'Loading index…'}</h1></div><div><label>Sort<select value={sort} onChange={(e) => setSort(e.target.value as Sort)}><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="company">Company A–Z</option></select></label></div></div><div className="active-filter-row"><span><Clock3 size={13} /> All listings are verified within 48 hours</span>{query && <button onClick={() => setQuery('')}>{query}<X size={12} /></button>}{Object.entries(filters).map(([k, v]) => v ? <button key={k} onClick={() => setFilters((f) => ({ ...f, [k]: '' }))}>{label(String(v))}<X size={12} /></button> : null)}</div>
-      {status === 'loading' && <div className="loading-list">{[1,2,3,4,5,6].map((n) => <div key={n} />)}</div>}{status === 'error' && <div className="workspace-state"><Database size={25} /><h2>The live index is unavailable</h2><p>{error}</p><button onClick={() => location.reload()}>Try again</button></div>}{status === 'ready' && visible.length === 0 && <div className="workspace-state"><Search size={25} /><h2>No exact matches</h2><p>Try a broader keyword or clear a filter.</p><button onClick={clear}>Clear all filters</button></div>}<div className="results-list job-grid">{pagedJobs.map((j) => <JobCard key={j.id} job={j} selected={String(j.id) === selectedId} saved={saved.has(String(j.id))} onSelect={() => setSelectedId(String(j.id))} onSave={() => toggle('saved', String(j.id))} onHide={() => toggle('hidden', String(j.id))} />)}</div>{status === 'ready' && visible.length > 0 && <nav className="pagination" aria-label="Job results pages"><button disabled={page === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ChevronLeft size={15} /> Previous</button><div>{Array.from({ length: pageCount }, (_, index) => index + 1).filter((number) => number === 1 || number === pageCount || Math.abs(number - page) <= 1).map((number, index, shown) => <span key={number}>{index > 0 && number - shown[index - 1] > 1 && <i>…</i>}<button className={number === page ? 'active' : ''} aria-current={number === page ? 'page' : undefined} onClick={() => setPage(number)}>{number}</button></span>)}</div><button disabled={page === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next <ChevronRight size={15} /></button></nav>}</main>
-      {selected && <DetailPanel job={selected} saved={saved.has(String(selected.id))} applied={applied.has(String(selected.id))} onSave={() => toggle('saved', String(selected.id))} onApplied={() => { if (!applied.has(String(selected.id))) toggle('applied', String(selected.id)); }} close={() => setSelectedId('')} />}</div>
-    {filtersOpen && <div className="mobile-filters"><button className="sheet-backdrop" aria-label="Close filters" onClick={() => setFiltersOpen(false)} /><div className="filter-sheet"><div className="sheet-title"><strong>Filters</strong><button onClick={() => setFiltersOpen(false)}><X size={18} /></button></div>{rail}<button className="show-jobs" onClick={() => setFiltersOpen(false)}>Show {visible.length} jobs</button></div></div>}</section>;
+
+  const selected = detailJob || jobs.find((job) => String(job.id) === selectedId) || null;
+  const companies = new Set(visible.map((job) => job.company)).size;
+
+  return <section className="jobs-page-v2"><JobSearchBar query={queryDraft} location={locationDraft} onQuery={setQueryDraft} onLocation={setLocationDraft} onSearch={() => { setQuery(queryDraft.trim()); setLocationQuery(locationDraft.trim()); }} />
+    <main className="shell jobs-results-shell-v3"><JobsToolbar jobs={visible.length} companies={companies} sort={sort} filterCount={filterCount} onSort={setSort} onFilters={() => setMobileFilters(true)} />
+      <JobFilterToolbar definitions={definitions} filters={filters} savedOnly={savedOnly} onToggle={toggleFilter} onClearCategory={clearCategory} onSaved={setSavedOnly} />
+      <ActiveFilters groups={activeGroups} onRemove={(key, value) => key === 'saved' ? setSavedOnly(false) : toggleFilter(key, value)} onClearAll={clearFilters} />
+      {status === 'loading' && <div className="jobs-grid-v2 skeleton-grid-v2">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
+      {status === 'error' && <div className="jobs-state-v2"><Database size={26} /><h2>The job index is unavailable</h2><p>{error}</p><button onClick={() => window.location.reload()}>Try again</button></div>}
+      {status === 'ready' && visible.length === 0 && <div className="jobs-state-v2"><Search size={26} /><h2>No jobs match these filters</h2><p>Try removing a filter or broadening your search.</p><button onClick={clearEverything}>Clear search and filters</button></div>}
+      {status === 'ready' && visible.length > 0 && <div className="jobs-grid-v2">{pagedJobs.map((job) => <JobCard key={job.id} job={job} selected={String(job.id) === selectedId} saved={saved.has(String(job.id))} onSelect={() => setSelectedId(String(job.id))} onSave={() => toggleState('saved', String(job.id))} onHide={() => toggleState('hidden', String(job.id))} />)}</div>}
+      {status === 'ready' && visible.length > 0 && <nav className="pagination-v2" aria-label="Job results pages"><button disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={15} /> Previous</button><span>Page {page} of {pageCount}</span><button disabled={page === pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Next <ChevronRight size={15} /></button></nav>}
+    </main>
+    {mobileFilters && <MobileFilterDrawer definitions={definitions} filters={filters} savedOnly={savedOnly} count={filterCount} onToggle={toggleFilter} onClearCategory={clearCategory} onSaved={setSavedOnly} onClearAll={clearFilters} onClose={() => setMobileFilters(false)} />}
+    {selected && <JobDetail job={selected} saved={saved.has(String(selected.id))} applied={applied.has(String(selected.id))} onSave={() => toggleState('saved', String(selected.id))} onApplied={() => { if (!applied.has(String(selected.id))) toggleState('applied', String(selected.id)); }} onClose={() => setSelectedId('')} />}
+  </section>;
 }
