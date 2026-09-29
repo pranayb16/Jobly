@@ -35,7 +35,7 @@ function normalizeJob(row: JobRow, index: number) {
     title: String(first(row, ['title', 'job_title', 'position'], 'Untitled role')),
     company: decodeDisplayValue(first(row, ['company', 'company_name', 'organization'], 'Company'), 'Company'),
     location: String(first(row, ['location', 'job_location', 'city'], 'Location flexible')),
-    description: String(first(row, ['description_text', 'description', 'job_description', 'summary'], '')),
+    description: String(first(row, ['description_excerpt', 'description'], '')),
     employmentType: String(first(row, ['employment_type', 'job_type', 'type'], 'full_time')),
     workplaceType: String(first(row, ['workplace_type', 'work_mode', 'remote_type'], '')),
     salaryMin: numberOrNull(first(row, ['salary_min', 'min_salary'], null)),
@@ -73,24 +73,6 @@ async function fetchJobsPage(apiBaseUrl: string, offset: number) {
   return response.json() as Promise<JobsApiPayload>;
 }
 
-async function fetchJobDetail(apiBaseUrl: string, row: JobRow) {
-  const id = first(row, ['id', 'job_id'], null);
-  if (id === null) return row;
-
-  try {
-    const response = await fetch(`${apiBaseUrl}/api/jobs/${encodeURIComponent(String(id))}`, {
-      cache: 'no-store',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!response.ok) return row;
-    const detail = await response.json() as JobRow;
-    return { ...row, ...detail };
-  } catch {
-    return row;
-  }
-}
 
 export async function GET() {
   try {
@@ -115,7 +97,6 @@ export async function GET() {
         if (pageRows.length === 0) break;
       }
 
-      rows = await Promise.all(rows.map((row) => fetchJobDetail(apiBaseUrl, row)));
     }
 
     const jobs = rows.map(normalizeJob).sort((a, b) => {

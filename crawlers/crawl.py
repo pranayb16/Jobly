@@ -1,8 +1,13 @@
-import json
 import logging
+
+from psycopg.types.json import Jsonb
 
 from crawlers.db import get_connection
 from crawlers.runner import crawl_source
+
+from crawlers.enrichment.input_builder import (
+    build_content_hash,
+)
 
 
 logging.basicConfig(
@@ -21,30 +26,51 @@ def save_job(
     source_id: int,
     job,
 ):
+
+    content_hash = build_content_hash(
+        job
+    )
+
     cur.execute(
         """
         INSERT INTO jobs (
             source_id,
             external_job_id,
+
             provider,
             company,
             title,
             location,
+
             employment_type,
             workplace_type,
+
             posted_at,
             posted_at_source,
+
             description_text,
             description_html,
+
             job_url,
             apply_url,
-            raw_payload
+
+            raw_payload,
+
+            content_hash,
+
+            classification_status
         )
 
         VALUES (
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s
+            %s, %s,
+            %s, %s, %s, %s,
+            %s, %s,
+            %s, %s,
+            %s, %s,
+            %s, %s,
+            %s,
+            %s,
+            'pending'
         )
 
         ON CONFLICT (
@@ -53,6 +79,12 @@ def save_job(
         )
 
         DO UPDATE SET
+
+            provider =
+                EXCLUDED.provider,
+
+            company =
+                EXCLUDED.company,
 
             title =
                 EXCLUDED.title,
@@ -67,7 +99,16 @@ def save_job(
                 EXCLUDED.workplace_type,
 
             posted_at =
-                EXCLUDED.posted_at,
+                COALESCE(
+                    EXCLUDED.posted_at,
+                    jobs.posted_at
+                ),
+
+            posted_at_source =
+                COALESCE(
+                    EXCLUDED.posted_at_source,
+                    jobs.posted_at_source
+                ),
 
             description_text =
                 EXCLUDED.description_text,
@@ -84,28 +125,130 @@ def save_job(
             raw_payload =
                 EXCLUDED.raw_payload,
 
+            classification_status =
+                CASE
+
+                    WHEN
+                        jobs.content_hash
+                        IS DISTINCT FROM
+                        EXCLUDED.content_hash
+
+                    THEN 'pending'
+
+                    ELSE
+                        jobs.classification_status
+
+                END,
+
+            classification_started_at =
+                CASE
+
+                    WHEN
+                        jobs.content_hash
+                        IS DISTINCT FROM
+                        EXCLUDED.content_hash
+
+                    THEN NULL
+
+                    ELSE
+                        jobs.classification_started_at
+
+                END,
+
+            classification_attempts =
+                CASE
+
+                    WHEN
+                        jobs.content_hash
+                        IS DISTINCT FROM
+                        EXCLUDED.content_hash
+
+                    THEN 0
+
+                    ELSE
+                        jobs.classification_attempts
+
+                END,
+
+            classification_error =
+                CASE
+
+                    WHEN
+                        jobs.content_hash
+                        IS DISTINCT FROM
+                        EXCLUDED.content_hash
+
+                    THEN NULL
+
+                    ELSE
+                        jobs.classification_error
+
+                END,
+
+            classified_at =
+                CASE
+
+                    WHEN
+                        jobs.content_hash
+                        IS DISTINCT FROM
+                        EXCLUDED.content_hash
+
+                    THEN NULL
+
+                    ELSE
+                        jobs.classified_at
+
+                END,
+
+            classified_content_hash =
+                CASE
+
+                    WHEN
+                        jobs.content_hash
+                        IS DISTINCT FROM
+                        EXCLUDED.content_hash
+
+                    THEN NULL
+
+                    ELSE
+                        jobs.classified_content_hash
+
+                END,
+
+            content_hash =
+                EXCLUDED.content_hash,
+
             last_seen_at =
                 NOW(),
 
             active =
                 TRUE
         """,
+
         (
             source_id,
             job.external_job_id,
+
             job.provider,
             job.company,
             job.title,
             job.location,
+
             job.employment_type,
             job.workplace_type,
+
             job.posted_at,
             job.posted_at_source,
+
             job.description.text,
             job.description.html,
+
             job.job_url,
             job.apply_url,
-            json.dumps(job.raw),
+
+            Jsonb(job.raw),
+
+            content_hash,
         ),
     )
 
@@ -116,7 +259,8 @@ def main():
 
         with conn.cursor() as cur:
 
-            # Only 50 initially
+            # Intentionally use the same first
+            # 50 sources during early development.
             cur.execute(
                 """
                 SELECT
@@ -168,6 +312,7 @@ def main():
                 with conn.cursor() as cur:
 
                     for job in jobs:
+
                         save_job(
                             cur,
                             source_id,
@@ -185,6 +330,7 @@ def main():
 
                         WHERE id = %s
                         """,
+
                         (
                             len(jobs),
                             source_id,
@@ -207,7 +353,8 @@ def main():
                 conn.rollback()
 
                 logging.exception(
-                    "[%s/%s] FAILED | %s | %s",
+                    "[%s/%s] FAILED | "
+                    "%s | %s",
                     index,
                     len(sources),
                     provider,

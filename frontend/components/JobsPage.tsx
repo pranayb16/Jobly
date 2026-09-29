@@ -1,200 +1,64 @@
 'use client';
 
-import {
-  ArrowRight,
-  ArrowUpRight,
-  BriefcaseBusiness,
-  Building2,
-  Check,
-  ChevronDown,
-  Clock3,
-  Database,
-  MapPin,
-  Search,
-  SlidersHorizontal,
-  X,
-} from 'lucide-react';
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { ArrowUpRight, Bookmark, BriefcaseBusiness, Building2, Check, ChevronDown, Clock3, Database, EyeOff, MapPin, Search, SlidersHorizontal, Sparkles, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Job } from '@/src/types';
 
-async function getJobs(signal?: AbortSignal): Promise<{ jobs: Job[]; count: number }> {
-  const response = await fetch('/api/jobs', { signal });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { message?: string } | null;
-    throw new Error(payload?.message ?? 'We could not load the jobs right now.');
-  }
-  return response.json() as Promise<{ jobs: Job[]; count: number }>;
-}
-
-const formatLabel = (value: string) => value
-  .replace(/([a-z])([A-Z])/g, '$1 $2')
-  .replace(/[_-]/g, ' ')
-  .replace(/\b\w/g, (letter) => letter.toUpperCase());
-
-function ageInHours(value: string | null) {
-  if (!value) return Number.POSITIVE_INFINITY;
-  const time = new Date(value).getTime();
-  return Number.isNaN(time) ? Number.POSITIVE_INFINITY : Math.max(0, (Date.now() - time) / 3_600_000);
-}
-
-function timeAgo(value: string | null) {
-  if (!value) return 'Recently';
-  const minutes = Math.floor(ageInHours(value) * 60);
-  if (!Number.isFinite(minutes)) return 'Recently';
-  if (minutes < 1) return 'Just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ago`;
-}
-
-function exactPostTime(value: string | null) {
-  if (!value) return undefined;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return date.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
-}
-
-function salary(job: Job) {
-  if (job.salaryMin === null && job.salaryMax === null) return null;
-  const currency = job.salaryCurrency || 'USD';
-  const formatter = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
-  if (job.salaryMin !== null && job.salaryMax !== null) return `${currency} ${formatter.format(job.salaryMin)}–${formatter.format(job.salaryMax)}`;
-  return `${currency} ${formatter.format((job.salaryMin ?? job.salaryMax) as number)}+`;
-}
-
-function JobRow({ job, index }: { job: Job; index: number }) {
-  const destination = job.applyUrl || job.jobUrl;
-  const initial = job.company.charAt(0).toUpperCase() || 'J';
-  const pay = salary(job);
-  return (
-    <article className="aggregator-job" style={{ '--delay': `${Math.min(index * 30, 240)}ms` } as CSSProperties}>
-      <div className="aggregator-logo">{initial}</div>
-      <div className="aggregator-job-main">
-        <div className="aggregator-title-row">
-          <div>
-            <h3>{job.title}</h3>
-            <p><strong>{job.company}</strong>{job.provider && <><span>·</span> via {formatLabel(job.provider)}</>}</p>
-          </div>
-          <time dateTime={job.createdAt ?? undefined} title={exactPostTime(job.createdAt)}><i /> {timeAgo(job.createdAt)}</time>
-        </div>
-        <div className="aggregator-meta">
-          <span><MapPin size={14} /> {job.location || 'Location flexible'}</span>
-          <span><BriefcaseBusiness size={14} /> {formatLabel(job.employmentType || 'Full time')}</span>
-          {job.workplaceType && <span>{formatLabel(job.workplaceType)}</span>}
-          {pay && <span className="salary-chip">{pay}</span>}
-        </div>
-        <p className="aggregator-description">{job.description || 'Open the source listing to see the complete role description and requirements.'}</p>
-        <div className="aggregator-row-footer">
-          <span className="source-label"><Database size={12} /> Aggregated from {job.provider ? formatLabel(job.provider) : 'company careers'}</span>
-          {destination ? <a href={destination} target="_blank" rel="noreferrer">View original listing <ArrowUpRight size={15} /></a> : <span>Source link unavailable</span>}
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function JobSkeleton() { return <div className="aggregator-job aggregator-skeleton"><div /><span /><span /><span /></div>; }
-
 type Filters = { location: string; company: string; source: string; employment: string; workplace: string; hours: number };
-type FilterPanelProps = {
-  jobs: Job[];
-  filters: Filters;
-  update: <K extends keyof Filters>(key: K, value: Filters[K]) => void;
-  clear: () => void;
-};
+type Sort = 'newest' | 'oldest' | 'company';
+const defaults: Filters = { location: '', company: '', source: '', employment: '', workplace: '', hours: 48 };
+const label = (value: string) => value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
+const hoursOld = (value: string | null) => value ? Math.max(0, (Date.now() - new Date(value).getTime()) / 3_600_000) : Infinity;
+const ago = (value: string | null) => { const mins = Math.floor(hoursOld(value) * 60); return !Number.isFinite(mins) ? 'Recently' : mins < 1 ? 'Just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ago`; };
+const exact = (value: string | null) => value ? new Date(value).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+const values = (jobs: Job[], key: keyof Job) => Array.from(new Set(jobs.map((j) => String(j[key] || '')).filter(Boolean))).sort();
+const storageKey = (kind: string) => `jobly:${kind}`;
+const readIds = (kind: string) => { try { return new Set<string>(JSON.parse(localStorage.getItem(storageKey(kind)) || '[]')); } catch { return new Set<string>(); } };
+function companyMark(company: string) { const colors = ['#335c67', '#6b705c', '#725a7a', '#8a5d52', '#426a5a']; return { background: colors[[...company].reduce((n, c) => n + c.charCodeAt(0), 0) % colors.length] }; }
 
-function countBy(jobs: Job[], key: keyof Job, value: string) { return jobs.filter((job) => job[key] === value).length; }
+function FilterSelect({ icon, title, value, onChange, children }: { icon?: React.ReactNode; title: string; value: string | number; onChange: (value: string) => void; children: React.ReactNode }) {
+  return <label className={value && value !== 48 ? 'filter-block active' : 'filter-block'}><span>{icon}{title}</span><div><select value={value} onChange={(e) => onChange(e.target.value)}>{children}</select><ChevronDown size={14} /></div></label>;
+}
 
-function FilterPanel({ jobs, filters, update, clear }: FilterPanelProps) {
-  const locations = useMemo(() => Array.from(new Set(jobs.map((job) => job.location).filter(Boolean))).sort(), [jobs]);
-  const companies = useMemo(() => Array.from(new Set(jobs.map((job) => job.company).filter(Boolean))).sort(), [jobs]);
-  const sources = useMemo(() => Array.from(new Set(jobs.map((job) => job.provider).filter(Boolean))).sort(), [jobs]);
-  const employment = useMemo(() => Array.from(new Set(jobs.map((job) => job.employmentType).filter(Boolean))).sort(), [jobs]);
-  const workplaces = useMemo(() => Array.from(new Set(jobs.map((job) => job.workplaceType).filter(Boolean))).sort(), [jobs]);
-  const activeCount = [filters.location, filters.company, filters.source, filters.employment, filters.workplace].filter(Boolean).length + (filters.hours < 48 ? 1 : 0);
-
-  return <div className="aggregator-filters-inner">
-    <div className="filters-title"><div><SlidersHorizontal size={17} /><strong>All filters</strong>{activeCount > 0 && <b>{activeCount}</b>}</div>{activeCount > 0 && <button type="button" onClick={clear}>Reset</button>}</div>
-    <div className="filter-group">
-      <span className="filter-label">Date posted</span>
-      <div className="filter-options">
-        {[6, 12, 24, 48].map((hours) => <button className={filters.hours === hours ? 'selected' : ''} key={hours} type="button" onClick={() => update('hours', hours)}><span>{filters.hours === hours && <Check size={11} />}</span>{hours === 48 ? 'Any time (48h)' : `Last ${hours} hours`}<em>{jobs.filter((job) => ageInHours(job.createdAt) <= hours).length}</em></button>)}
-      </div>
-    </div>
-    <div className="filter-group">
-      <label htmlFor="company-filter">Company</label>
-      <div className="select-wrap"><Building2 size={15} /><select id="company-filter" value={filters.company} onChange={(event) => update('company', event.target.value)}><option value="">All companies</option>{companies.map((item) => <option key={item}>{item}</option>)}</select><ChevronDown size={13} /></div>
-    </div>
-    <div className="filter-group">
-      <label htmlFor="location-filter">Location</label>
-      <div className="select-wrap"><MapPin size={15} /><select id="location-filter" value={filters.location} onChange={(event) => update('location', event.target.value)}><option value="">All locations</option>{locations.map((item) => <option key={item}>{item}</option>)}</select><ChevronDown size={13} /></div>
-    </div>
-    {employment.length > 0 && <div className="filter-group"><span className="filter-label">Employment type</span><div className="filter-options"><button className={!filters.employment ? 'selected' : ''} type="button" onClick={() => update('employment', '')}><span>{!filters.employment && <Check size={11} />}</span>All types<em>{jobs.length}</em></button>{employment.map((item) => <button className={filters.employment === item ? 'selected' : ''} key={item} type="button" onClick={() => update('employment', item)}><span>{filters.employment === item && <Check size={11} />}</span>{formatLabel(item)}<em>{countBy(jobs, 'employmentType', item)}</em></button>)}</div></div>}
-    {workplaces.length > 0 && <div className="filter-group"><span className="filter-label">Work style</span><div className="filter-options"><button className={!filters.workplace ? 'selected' : ''} type="button" onClick={() => update('workplace', '')}><span>{!filters.workplace && <Check size={11} />}</span>All styles<em>{jobs.length}</em></button>{workplaces.map((item) => <button className={filters.workplace === item ? 'selected' : ''} key={item} type="button" onClick={() => update('workplace', item)}><span>{filters.workplace === item && <Check size={11} />}</span>{formatLabel(item)}<em>{countBy(jobs, 'workplaceType', item)}</em></button>)}</div></div>}
-    {sources.length > 0 && <div className="filter-group"><label htmlFor="source-filter">Job source</label><div className="select-wrap"><Database size={15} /><select id="source-filter" value={filters.source} onChange={(event) => update('source', event.target.value)}><option value="">All sources</option>{sources.map((item) => <option key={item} value={item}>{formatLabel(item)} ({countBy(jobs, 'provider', item)})</option>)}</select><ChevronDown size={13} /></div></div>}
+function FilterRail({ jobs, filters, setFilter, savedOnly, setSavedOnly, clear }: { jobs: Job[]; filters: Filters; setFilter: (key: keyof Filters, value: string | number) => void; savedOnly: boolean; setSavedOnly: (v: boolean) => void; clear: () => void }) {
+  const active = Object.entries(filters).filter(([k, v]) => k === 'hours' ? v !== 48 : Boolean(v)).length + Number(savedOnly);
+  return <div className="filter-rail-inner"><div className="rail-heading"><div><SlidersHorizontal size={16} /><strong>Refine results</strong>{active > 0 && <b>{active}</b>}</div>{active > 0 && <button onClick={clear}>Clear</button>}</div>
+    <button className={savedOnly ? 'saved-filter active' : 'saved-filter'} onClick={() => setSavedOnly(!savedOnly)}><Bookmark size={15} /> Saved jobs</button>
+    <FilterSelect title="Date posted" icon={<Clock3 size={14} />} value={filters.hours} onChange={(v) => setFilter('hours', Number(v))}><option value={48}>Any time · 48h</option><option value={24}>Past 24 hours</option><option value={12}>Past 12 hours</option><option value={6}>Past 6 hours</option></FilterSelect>
+    <FilterSelect title="Work environment" value={filters.workplace} onChange={(v) => setFilter('workplace', v)}><option value="">Remote, hybrid or onsite</option>{values(jobs, 'workplaceType').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
+    <FilterSelect title="Employment type" icon={<BriefcaseBusiness size={14} />} value={filters.employment} onChange={(v) => setFilter('employment', v)}><option value="">All commitments</option>{values(jobs, 'employmentType').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
+    <FilterSelect title="Location" icon={<MapPin size={14} />} value={filters.location} onChange={(v) => setFilter('location', v)}><option value="">Everywhere</option>{values(jobs, 'location').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
+    <FilterSelect title="Company" icon={<Building2 size={14} />} value={filters.company} onChange={(v) => setFilter('company', v)}><option value="">All companies</option>{values(jobs, 'company').map((v) => <option key={v}>{v}</option>)}</FilterSelect>
+    <FilterSelect title="Job source" icon={<Database size={14} />} value={filters.source} onChange={(v) => setFilter('source', v)}><option value="">All sources</option>{values(jobs, 'provider').map((v) => <option key={v}>{label(v)}</option>)}</FilterSelect>
+    <div className="rail-note"><Sparkles size={15} /><p><strong>More filters are coming.</strong> Skills, seniority, and experience will appear when enriched fields are published by the API.</p></div>
   </div>;
 }
 
-const defaultFilters: Filters = { location: '', company: '', source: '', employment: '', workplace: '', hours: 48 };
+function JobCard({ job, selected, saved, onSelect, onSave, onHide }: { job: Job; selected: boolean; saved: boolean; onSelect: () => void; onSave: () => void; onHide: () => void }) {
+  return <article className={selected ? 'result-card selected' : 'result-card'} onClick={onSelect}><div className="company-mark" style={companyMark(job.company)}>{job.company.slice(0, 1).toUpperCase()}</div><div className="result-copy"><div className="result-topline"><span>{job.company}</span><time title={exact(job.createdAt)}><i />{ago(job.createdAt)}</time></div><h3>{job.title}</h3><div className="result-meta"><span><MapPin size={13} />{job.location || 'Location flexible'}</span>{job.employmentType && <span><BriefcaseBusiness size={13} />{label(job.employmentType)}</span>}{job.workplaceType && <span>{label(job.workplaceType)}</span>}</div><p>{job.description || 'Open this role to review the full description and requirements.'}</p><div className="result-source"><span>via {label(job.provider || 'company careers')}</span><div><button aria-label={saved ? 'Unsave job' : 'Save job'} onClick={(e) => { e.stopPropagation(); onSave(); }} className={saved ? 'is-saved' : ''}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} /></button><button aria-label="Hide job" onClick={(e) => { e.stopPropagation(); onHide(); }}><EyeOff size={15} /></button></div></div></div></article>;
+}
+
+function DetailPanel({ job, saved, applied, onSave, onApplied, close }: { job: Job; saved: boolean; applied: boolean; onSave: () => void; onApplied: () => void; close: () => void }) {
+  const destination = job.applyUrl || job.jobUrl;
+  return <aside className="detail-panel"><button className="detail-close" onClick={close} aria-label="Close job details"><X size={18} /></button><div className="detail-head"><div className="company-mark large" style={companyMark(job.company)}>{job.company.slice(0, 1)}</div><span>{job.company}</span><h2>{job.title}</h2><div className="detail-meta"><span><MapPin size={14} />{job.location || 'Location flexible'}</span><span><Clock3 size={14} />Posted {ago(job.createdAt)}</span></div></div><div className="detail-actions">{destination ? <a href={destination} target="_blank" rel="noreferrer" onClick={onApplied}>Apply on company site <ArrowUpRight size={16} /></a> : <button disabled>Apply link unavailable</button>}<button className={saved ? 'saved' : ''} onClick={onSave}><Bookmark size={17} fill={saved ? 'currentColor' : 'none'} />{saved ? 'Saved' : 'Save'}</button></div>{applied && <div className="applied-banner"><Check size={15} /> Marked as applied</div>}<div className="detail-facts"><div><small>Commitment</small><strong>{label(job.employmentType || 'Not specified')}</strong></div><div><small>Work setting</small><strong>{label(job.workplaceType || 'Not specified')}</strong></div><div><small>Source</small><strong>{label(job.provider || 'Company careers')}</strong></div><div><small>Published</small><strong>{exact(job.createdAt) || 'Recently'}</strong></div></div><div className="detail-body"><h3>About this role</h3>{job.description ? job.description.split(/\n+/).filter(Boolean).map((p, i) => <p key={i}>{p}</p>) : <p>The source did not provide a description preview. Open the original listing for full details.</p>}</div>{job.jobUrl && <a className="original-link" href={job.jobUrl} target="_blank" rel="noreferrer">View original listing <ArrowUpRight size={14} /></a>}</aside>;
+}
 
 export default function JobsPage() {
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [query, setQuery] = useState('');
-  const [filters, setFilters] = useState<Filters>(defaultFilters);
-  const [sort, setSort] = useState<'newest' | 'oldest' | 'company'>('newest');
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    const controller = new AbortController();
-    getJobs(controller.signal).then((data) => { setJobs(data.jobs); setStatus('ready'); }).catch((reason: unknown) => {
-      if (reason instanceof DOMException && reason.name === 'AbortError') return;
-      setError(reason instanceof Error ? reason.message : 'We could not load the jobs right now.'); setStatus('error');
-    });
-    return () => controller.abort();
-  }, []);
-
-  const updateFilter = <K extends keyof Filters>(key: K, value: Filters[K]) => setFilters((current) => ({ ...current, [key]: value }));
-  const clearFilters = () => { setQuery(''); setFilters(defaultFilters); };
-  const visibleJobs = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    const filtered = jobs.filter((job) => (!needle || [job.title, job.company, job.description, job.location].some((field) => field.toLowerCase().includes(needle)))
-      && (!filters.location || job.location === filters.location)
-      && (!filters.company || job.company === filters.company)
-      && (!filters.source || job.provider === filters.source)
-      && (!filters.employment || job.employmentType === filters.employment)
-      && (!filters.workplace || job.workplaceType === filters.workplace)
-      && ageInHours(job.createdAt) <= filters.hours);
-    return [...filtered].sort((a, b) => sort === 'company' ? a.company.localeCompare(b.company) : (new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime()) * (sort === 'newest' ? -1 : 1));
-  }, [jobs, query, filters, sort]);
-
-  const companiesCount = new Set(jobs.map((job) => job.company)).size;
-  const sourcesCount = new Set(jobs.map((job) => job.provider).filter(Boolean)).size;
-  const filterProps = { jobs, filters, update: updateFilter, clear: clearFilters };
-
-  return <section className="aggregator-page">
-    <div className="aggregator-search-shell">
-      <div className="shell aggregator-search-inner">
-        <div><span className="aggregator-kicker"><Database size={13} /> Multi-source job index</span><h1>Search every fresh job<br />from one place.</h1></div>
-        <div className="aggregator-stats"><span><strong>{status === 'ready' ? jobs.length : '—'}</strong> live jobs</span><span><strong>{status === 'ready' ? companiesCount : '—'}</strong> companies</span><span><strong>{status === 'ready' ? sourcesCount : '—'}</strong> sources</span></div>
-        <div className="aggregator-search"><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search job titles, companies, skills, or keywords" aria-label="Search all jobs" /><button type="button" onClick={() => document.querySelector('.aggregator-results')?.scrollIntoView({ behavior: 'smooth' })}>Search jobs <ArrowRight size={16} /></button></div>
-      </div>
-    </div>
-    <div className="shell aggregator-layout">
-      <aside className="aggregator-sidebar"><FilterPanel {...filterProps} /></aside>
-      <main className="aggregator-results">
-        <div className="aggregator-results-bar">
-          <div><span>All aggregated jobs</span><h2>{status === 'ready' ? `${visibleJobs.length} results` : 'Loading jobs…'}</h2></div>
-          <div><button className="mobile-filter-button" type="button" onClick={() => setFiltersOpen(true)}><SlidersHorizontal size={15} /> Filters</button><label>Sort by<select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="company">Company A–Z</option></select></label></div>
-        </div>
-        <div className="aggregator-notice"><Clock3 size={15} /><span><strong>Freshness guaranteed.</strong> This index only includes jobs published in the last 48 hours.</span></div>
-        {status === 'loading' && <div className="aggregator-list"><JobSkeleton /><JobSkeleton /><JobSkeleton /></div>}
-        {status === 'error' && <div className="state-card"><div className="state-icon"><BriefcaseBusiness size={24} /></div><h2>We couldn’t open the job index</h2><p>{error}</p><button className="state-button" type="button" onClick={() => window.location.reload()}>Try again</button></div>}
-        {status === 'ready' && visibleJobs.length > 0 && <div className="aggregator-list">{visibleJobs.map((job, index) => <JobRow key={job.id} job={job} index={index} />)}</div>}
-        {status === 'ready' && visibleJobs.length === 0 && <div className="state-card"><div className="state-icon"><Search size={24} /></div><h2>No jobs match these filters</h2><p>Broaden your search or reset the filters to return to the full index.</p><button className="state-button" type="button" onClick={clearFilters}>Reset all filters</button></div>}
-      </main>
-    </div>
-    {filtersOpen && <div className="mobile-filter-sheet"><button className="filter-backdrop" type="button" aria-label="Close filters" onClick={() => setFiltersOpen(false)} /><div className="filter-drawer"><button className="drawer-close" type="button" onClick={() => setFiltersOpen(false)}><X size={19} /> Close</button><FilterPanel {...filterProps} /><button className="show-results-button" type="button" onClick={() => setFiltersOpen(false)}>Show {visibleJobs.length} jobs</button></div></div>}
-  </section>;
+  const [jobs, setJobs] = useState<Job[]>([]); const [query, setQuery] = useState(''); const [filters, setFilters] = useState(defaults); const [sort, setSort] = useState<Sort>('newest');
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading'); const [error, setError] = useState(''); const [selectedId, setSelectedId] = useState(''); const [filtersOpen, setFiltersOpen] = useState(false);
+  const [detailJob, setDetailJob] = useState<Job | null>(null);
+  const [saved, setSaved] = useState<Set<string>>(new Set()); const [hidden, setHidden] = useState<Set<string>>(new Set()); const [applied, setApplied] = useState<Set<string>>(new Set()); const [savedOnly, setSavedOnly] = useState(false);
+  useEffect(() => { const params = new URLSearchParams(location.search); setQuery(params.get('q') || ''); setSelectedId(params.get('job') || ''); setFilters({ location: params.get('location') || '', company: params.get('company') || '', source: params.get('source') || '', employment: params.get('employment') || '', workplace: params.get('workplace') || '', hours: Number(params.get('hours')) || 48 }); setSaved(readIds('saved')); setHidden(readIds('hidden')); setApplied(readIds('applied')); const c = new AbortController(); fetch('/api/jobs', { signal: c.signal }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).message || 'Unable to load jobs'); return r.json(); }).then((d) => { setJobs(d.jobs); setStatus('ready'); }).catch((e) => { if (e.name !== 'AbortError') { setError(e.message); setStatus('error'); } }); return () => c.abort(); }, []);
+  useEffect(() => { const p = new URLSearchParams(); if (query) p.set('q', query); if (selectedId) p.set('job', selectedId); Object.entries(filters).forEach(([k, v]) => { if (v && v !== 48) p.set(k, String(v)); }); history.replaceState(null, '', `${location.pathname}${p.size ? `?${p}` : ''}`); }, [query, selectedId, filters]);
+  useEffect(() => { if (!selectedId) { setDetailJob(null); return; } const c = new AbortController(); fetch(`/api/jobs/${encodeURIComponent(selectedId)}`, { signal: c.signal }).then((r) => r.ok ? r.json() : Promise.reject()).then(setDetailJob).catch(() => setDetailJob(null)); return () => c.abort(); }, [selectedId]);
+  const persist = (kind: string, ids: Set<string>) => { const next = new Set(ids); localStorage.setItem(storageKey(kind), JSON.stringify([...next])); return next; };
+  const toggle = (kind: 'saved' | 'hidden' | 'applied', id: string) => { const current = kind === 'saved' ? saved : kind === 'hidden' ? hidden : applied; const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); const stored = persist(kind, next); if (kind === 'saved') setSaved(stored); else if (kind === 'hidden') setHidden(stored); else setApplied(stored); };
+  const visible = useMemo(() => jobs.filter((j) => { const id = String(j.id); const q = query.toLowerCase().trim(); return !hidden.has(id) && (!savedOnly || saved.has(id)) && (!q || [j.title, j.company, j.location, j.description].some((x) => x.toLowerCase().includes(q))) && (!filters.location || j.location === filters.location) && (!filters.company || j.company === filters.company) && (!filters.source || label(j.provider) === filters.source || j.provider === filters.source) && (!filters.employment || j.employmentType === filters.employment) && (!filters.workplace || j.workplaceType === filters.workplace) && hoursOld(j.createdAt) <= filters.hours; }).sort((a, b) => sort === 'company' ? a.company.localeCompare(b.company) : (new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()) * (sort === 'newest' ? -1 : 1)), [jobs, query, filters, sort, savedOnly, saved, hidden]);
+  const selected = detailJob || jobs.find((j) => String(j.id) === selectedId) || null; const clear = () => { setFilters(defaults); setQuery(''); setSavedOnly(false); };
+  const rail = <FilterRail jobs={jobs} filters={filters} savedOnly={savedOnly} setSavedOnly={setSavedOnly} clear={clear} setFilter={(key, value) => setFilters((f) => ({ ...f, [key]: value }))} />;
+  return <section className="jobs-workspace"><div className="search-command"><div className="shell"><div className="fresh-promise"><span><i />48-hour live index</span><p>New roles gathered directly from company career sites.</p></div><div className="command-bar"><Search size={19} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search roles, companies, skills, or locations" aria-label="Search jobs" />{query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={16} /></button>}</div></div></div>
+    <div className={selected ? 'workspace-grid has-detail' : 'workspace-grid'}><aside className="desktop-filter-rail">{rail}</aside><main className="results-column"><div className="results-toolbar"><div><span>Fresh opportunities</span><h1>{status === 'ready' ? `${visible.length.toLocaleString()} jobs` : 'Loading index…'}</h1></div><div><button className="open-filters" onClick={() => setFiltersOpen(true)}><SlidersHorizontal size={15} /> Filters</button><label>Sort<select value={sort} onChange={(e) => setSort(e.target.value as Sort)}><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="company">Company A–Z</option></select></label></div></div><div className="active-filter-row"><span><Clock3 size={13} /> Only jobs posted within 48 hours</span>{query && <button onClick={() => setQuery('')}>{query}<X size={12} /></button>}{Object.entries(filters).map(([k, v]) => v && v !== 48 ? <button key={k} onClick={() => setFilters((f) => ({ ...f, [k]: k === 'hours' ? 48 : '' }))}>{label(String(v))}<X size={12} /></button> : null)}</div>
+      {status === 'loading' && <div className="loading-list">{[1,2,3,4].map((n) => <div key={n} />)}</div>}{status === 'error' && <div className="workspace-state"><Database size={25} /><h2>The live index is unavailable</h2><p>{error}</p><button onClick={() => location.reload()}>Try again</button></div>}{status === 'ready' && visible.length === 0 && <div className="workspace-state"><Search size={25} /><h2>No exact matches</h2><p>Try a broader keyword or clear a filter.</p><button onClick={clear}>Clear all filters</button></div>}<div className="results-list">{visible.map((j) => <JobCard key={j.id} job={j} selected={String(j.id) === selectedId} saved={saved.has(String(j.id))} onSelect={() => setSelectedId(String(j.id))} onSave={() => toggle('saved', String(j.id))} onHide={() => toggle('hidden', String(j.id))} />)}</div></main>
+      {selected && <DetailPanel job={selected} saved={saved.has(String(selected.id))} applied={applied.has(String(selected.id))} onSave={() => toggle('saved', String(selected.id))} onApplied={() => { if (!applied.has(String(selected.id))) toggle('applied', String(selected.id)); }} close={() => setSelectedId('')} />}</div>
+    {filtersOpen && <div className="mobile-filters"><button className="sheet-backdrop" aria-label="Close filters" onClick={() => setFiltersOpen(false)} /><div className="filter-sheet"><div className="sheet-title"><strong>Filters</strong><button onClick={() => setFiltersOpen(false)}><X size={18} /></button></div>{rail}<button className="show-jobs" onClick={() => setFiltersOpen(false)}>Show {visible.length} jobs</button></div></div>}</section>;
 }

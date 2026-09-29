@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUpRight, Menu, X } from 'lucide-react';
+import { ArrowRight, Menu, X } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState } from 'react';
@@ -13,8 +13,9 @@ export function Header() {
     <header className="site-header">
       <div className="shell header-inner">
         <Link className="brand" href="/" aria-label="Jobly home" onClick={() => setMenuOpen(false)}>
-          <span className="brand-mark">J</span>
+          <span className="brand-mark"><i /><i /></span>
           <span>jobly</span>
+          <small>beta</small>
         </Link>
 
         <button className="menu-button" type="button" aria-label={menuOpen ? 'Close menu' : 'Open menu'} aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
@@ -22,10 +23,9 @@ export function Header() {
         </button>
 
         <nav className={menuOpen ? 'header-nav is-open' : 'header-nav'} aria-label="Main navigation">
-          <Link className={pathname === '/' ? 'nav-link active' : 'nav-link'} href="/" onClick={() => setMenuOpen(false)}>Home</Link>
-          <Link className={pathname === '/jobs' ? 'nav-link active' : 'nav-link'} href="/jobs" onClick={() => setMenuOpen(false)}>All jobs</Link>
-          <span className="nav-divider" />
-          <Link className="nav-cta" href="/jobs" onClick={() => setMenuOpen(false)}>Open job index <ArrowUpRight size={15} /></Link>
+          <Link className={pathname === '/jobs' ? 'nav-link active' : 'nav-link'} href="/jobs" onClick={() => setMenuOpen(false)}>Browse jobs</Link>
+          <Link className="nav-link" href="/#how-it-works" onClick={() => setMenuOpen(false)}>How it works</Link>
+          <Link className="nav-cta" href="/jobs" onClick={() => setMenuOpen(false)}>Search the index <ArrowRight size={15} /></Link>
         </nav>
       </div>
     </header>

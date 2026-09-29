@@ -92,6 +92,8 @@ def get_jobs(
                     location,
                     employment_type,
                     workplace_type,
+                    LEFT(description_text, 300)
+                        AS description_excerpt,
                     posted_at,
                     posted_at_source,
                     job_url,

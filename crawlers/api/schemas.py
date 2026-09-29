@@ -16,6 +16,8 @@ class JobListItem(BaseModel):
     employment_type: str | None = None
     workplace_type: str | None = None
 
+    description_excerpt: str | None = None
+
     posted_at: datetime | None = None
     posted_at_source: str | None = None
 

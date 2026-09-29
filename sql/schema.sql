@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 
     raw_payload JSONB,
 
+    content_hash TEXT,
+
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
