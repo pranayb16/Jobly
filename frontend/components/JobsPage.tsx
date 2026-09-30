@@ -1,6 +1,6 @@
 'use client';
 
-import { ChevronLeft, ChevronRight, Database, Search } from 'lucide-react';
+import { Database, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { Job } from '@/src/types';
 import { ActiveFilters } from './jobs/ActiveFilters';
@@ -16,6 +16,7 @@ import type { ActiveFilterGroup, FilterDefinition, FilterKey, Filters, Sort } fr
 
 const defaults = (): Filters => ({ datePosted: [], location: [], workplace: [], role: [], experience: [], employment: [], skill: [], company: [], source: [] });
 const filterLabels: Record<FilterKey, string> = { datePosted: 'Date posted', location: 'Location', workplace: 'Workplace', role: 'Role', experience: 'Experience', employment: 'Job type', skill: 'Skills', company: 'Company', source: 'Source' };
+const JOBS_POLL_INTERVAL_MS = 60_000;
 const storageKey = (kind: string) => `jobly:${kind}`;
 const readIds = (kind: string) => { try { return new Set<string>(JSON.parse(localStorage.getItem(storageKey(kind)) || '[]')); } catch { return new Set<string>(); } };
 const readInitialFilters = (params: URLSearchParams): Filters => {
@@ -70,9 +71,49 @@ export default function JobsPage() {
     setFilters(readInitialFilters(params));
     setUrlHydrated(true);
     setSaved(readIds('saved')); setHidden(readIds('hidden')); setApplied(readIds('applied'));
-    const controller = new AbortController();
-    fetch('/api/jobs', { signal: controller.signal }).then(async (response) => { if (!response.ok) throw new Error((await response.json()).message || 'Unable to load jobs'); return response.json(); }).then((data) => { setJobs(data.jobs); setStatus('ready'); }).catch((reason) => { if (reason.name !== 'AbortError') { setError(reason.message); setStatus('error'); } });
-    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let hasLoaded = false;
+    let activeRequest: AbortController | null = null;
+
+    const refreshJobs = async () => {
+      if (activeRequest) return;
+      const controller = new AbortController();
+      activeRequest = controller;
+
+      try {
+        const response = await fetch('/api/jobs', { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error((await response.json()).message || 'Unable to load jobs');
+        const data = await response.json();
+        if (disposed) return;
+        setJobs(data.jobs);
+        setError('');
+        setStatus('ready');
+        hasLoaded = true;
+      } catch (reason) {
+        if (disposed || (reason instanceof DOMException && reason.name === 'AbortError')) return;
+        if (!hasLoaded) {
+          setError(reason instanceof Error ? reason.message : 'Unable to load jobs');
+          setStatus('error');
+        }
+      } finally {
+        if (activeRequest === controller) activeRequest = null;
+      }
+    };
+
+    const refreshWhenVisible = () => { if (document.visibilityState === 'visible') void refreshJobs(); };
+    void refreshJobs();
+    const poll = window.setInterval(() => void refreshJobs(), JOBS_POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(poll);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      activeRequest?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -142,8 +183,19 @@ export default function JobsPage() {
   }, [filters, optionMaps, savedOnly]);
 
   const pageSize = 12; const pageCount = Math.max(1, Math.ceil(visible.length / pageSize)); const pagedJobs = visible.slice((page - 1) * pageSize, page * pageSize);
+  const pageWindowSize = 7;
+  const pageWindowStart = Math.min(page, Math.max(1, pageCount - pageWindowSize + 1));
+  const visiblePages = Array.from({ length: Math.min(pageWindowSize, pageCount) }, (_, index) => pageWindowStart + index);
   useEffect(() => { setPage(1); }, [query, locationQuery, filters, sort, savedOnly]);
   useEffect(() => { if (page > pageCount) setPage(pageCount); }, [page, pageCount]);
+  const goToPage = (nextPage: number) => {
+    const boundedPage = Math.min(pageCount, Math.max(1, nextPage));
+    if (boundedPage === page) return;
+    setPage(boundedPage);
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    });
+  };
 
   const selected = detailJob || jobs.find((job) => String(job.id) === selectedId) || null;
   const companies = new Set(visible.map((job) => job.company)).size;
@@ -156,7 +208,14 @@ export default function JobsPage() {
       {status === 'error' && <div className="jobs-state-v2"><Database size={26} /><h2>The job index is unavailable</h2><p>{error}</p><button onClick={() => window.location.reload()}>Try again</button></div>}
       {status === 'ready' && visible.length === 0 && <div className="jobs-state-v2"><Search size={26} /><h2>No jobs match these filters</h2><p>Try removing a filter or broadening your search.</p><button onClick={clearEverything}>Clear search and filters</button></div>}
       {status === 'ready' && visible.length > 0 && <div className="jobs-grid-v2">{pagedJobs.map((job) => <JobCard key={job.id} job={job} selected={String(job.id) === selectedId} saved={saved.has(String(job.id))} onSelect={() => setSelectedId(String(job.id))} onSave={() => toggleState('saved', String(job.id))} onHide={() => toggleState('hidden', String(job.id))} />)}</div>}
-      {status === 'ready' && visible.length > 0 && <nav className="pagination-v2" aria-label="Job results pages"><button disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={15} /> Previous</button><span>Page {page} of {pageCount}</span><button disabled={page === pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Next <ChevronRight size={15} /></button></nav>}
+      {status === 'ready' && visible.length > 0 && pageCount > 1 && <nav className="pagination-v2" aria-label="Job results pages">
+        <button className="pagination-boundary-v2" disabled={page === 1} onClick={() => goToPage(1)}>First</button>
+        <div className="pagination-pages-v2">
+          {visiblePages.map((pageNumber) => <button key={pageNumber} className={pageNumber === page ? 'active' : ''} aria-current={pageNumber === page ? 'page' : undefined} aria-label={`Page ${pageNumber}`} onClick={() => goToPage(pageNumber)}>{pageNumber}</button>)}
+        </div>
+        <button className="pagination-boundary-v2" disabled={page === pageCount} onClick={() => goToPage(pageCount)}>Last</button>
+        <span className="sr-only" aria-live="polite">Page {page} of {pageCount}</span>
+      </nav>}
     </main>
     {mobileFilters && <MobileFilterDrawer definitions={definitions} filters={filters} savedOnly={savedOnly} count={filterCount} onToggle={toggleFilter} onClearCategory={clearCategory} onSaved={setSavedOnly} onClearAll={clearFilters} onClose={() => setMobileFilters(false)} />}
     {selected && <JobDetail job={selected} saved={saved.has(String(selected.id))} applied={applied.has(String(selected.id))} onSave={() => toggleState('saved', String(selected.id))} onApplied={() => { if (!applied.has(String(selected.id))) toggleState('applied', String(selected.id)); }} onClose={() => setSelectedId('')} />}

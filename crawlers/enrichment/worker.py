@@ -5,7 +5,9 @@ import os
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from crawlers.db import get_connection
+from crawlers.db import (
+    get_connection,
+)
 
 from crawlers.enrichment.classifier import (
     classify_job,
@@ -15,11 +17,16 @@ from crawlers.enrichment.input_builder import (
     build_classifier_payload,
 )
 
+from crawlers.market_scope import (
+    classify_us_job,
+)
+
 
 CLASSIFICATION_VERSION = os.getenv(
     "AI_CLASSIFICATION_VERSION",
     "v1",
 )
+
 
 MAX_ATTEMPTS = int(
     os.getenv(
@@ -31,6 +38,7 @@ MAX_ATTEMPTS = int(
 
 logging.basicConfig(
     level=logging.INFO,
+
     format=(
         "%(asctime)s | "
         "%(levelname)s | "
@@ -39,11 +47,9 @@ logging.basicConfig(
 )
 
 
-def recover_stale_jobs(conn):
-    """
-    Recover jobs left in processing state
-    if a worker crashed or was killed.
-    """
+def recover_stale_jobs(
+    conn,
+):
 
     with conn.cursor() as cur:
 
@@ -54,9 +60,14 @@ def recover_stale_jobs(conn):
             SET
                 classification_status =
                     CASE
-                        WHEN classification_attempts >= %s
+
+                        WHEN
+                            classification_attempts >= %s
+
                         THEN 'failed'
+
                         ELSE 'pending'
+
                     END,
 
                 classification_started_at =
@@ -75,8 +86,8 @@ def recover_stale_jobs(conn):
                 AND classification_started_at
                     IS NOT NULL
 
-                AND classification_started_at
-                    < NOW()
+                AND classification_started_at <
+                    NOW()
                     - INTERVAL '15 minutes'
             """,
             (
@@ -84,20 +95,13 @@ def recover_stale_jobs(conn):
             ),
         )
 
+
     conn.commit()
 
 
-def count_pending_fresh_jobs(conn):
-    """
-    Count jobs eligible for AI processing.
-
-    Only jobs that are:
-    - active
-    - have a real posted_at
-    - posted within the last 48 hours
-    - pending classification
-    - below retry limit
-    """
+def count_pending_fresh_jobs(
+    conn,
+):
 
     with conn.cursor() as cur:
 
@@ -113,33 +117,32 @@ def count_pending_fresh_jobs(conn):
                 AND posted_at IS NOT NULL
 
                 AND posted_at >=
-                    NOW() - INTERVAL '48 hours'
+                    NOW()
+                    - INTERVAL '48 hours'
 
-                AND content_hash IS NOT NULL
+                AND content_hash
+                    IS NOT NULL
 
                 AND classification_status =
                     'pending'
 
-                AND classification_attempts < %s
+                AND classification_attempts
+                    < %s
             """,
             (
                 MAX_ATTEMPTS,
             ),
         )
 
-        row = cur.fetchone()
 
-    return row[0]
+        return (
+            cur.fetchone()[0]
+        )
 
 
-def claim_next_job(conn):
-    """
-    Atomically claim one fresh pending job.
-
-    FOR UPDATE SKIP LOCKED allows multiple
-    workers to run later without processing
-    the same job.
-    """
+def claim_next_job(
+    conn,
+):
 
     with conn.cursor(
         row_factory=dict_row
@@ -173,12 +176,15 @@ def claim_next_job(conn):
             WHERE
                 active = TRUE
 
-                AND posted_at IS NOT NULL
+                AND posted_at
+                    IS NOT NULL
 
                 AND posted_at >=
-                    NOW() - INTERVAL '48 hours'
+                    NOW()
+                    - INTERVAL '48 hours'
 
-                AND content_hash IS NOT NULL
+                AND content_hash
+                    IS NOT NULL
 
                 AND classification_status =
                     'pending'
@@ -200,12 +206,18 @@ def claim_next_job(conn):
             ),
         )
 
-        job = cur.fetchone()
+
+        job = (
+            cur.fetchone()
+        )
+
 
         if job is None:
+
             conn.commit()
 
             return None
+
 
         cur.execute(
             """
@@ -218,9 +230,6 @@ def claim_next_job(conn):
                 classification_started_at =
                     NOW(),
 
-                classification_attempts =
-                    classification_attempts + 1,
-
                 classification_error =
                     NULL
 
@@ -231,26 +240,126 @@ def claim_next_job(conn):
             ),
         )
 
-        job[
-            "classification_attempts"
-        ] += 1
 
     conn.commit()
 
+
     return job
+
+
+def save_market_decision(
+    conn,
+    job: dict,
+    eligible: bool,
+    reason: str,
+):
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            UPDATE jobs
+
+            SET
+                is_us_job = %s,
+
+                us_location_reason =
+                    %s
+
+            WHERE
+                id = %s
+
+                AND content_hash = %s
+            """,
+            (
+                eligible,
+                reason,
+
+                job["id"],
+                job["content_hash"],
+            ),
+        )
+
+
+    conn.commit()
+
+
+def skip_non_us_job(
+    conn,
+    job: dict,
+    reason: str,
+):
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            UPDATE jobs
+
+            SET
+                is_us_job = FALSE,
+
+                us_location_reason =
+                    %s,
+
+                classification_status =
+                    'skipped_non_us',
+
+                classification_started_at =
+                    NULL,
+
+                classification_error =
+                    NULL
+
+            WHERE
+                id = %s
+
+                AND content_hash =
+                    %s
+            """,
+            (
+                reason,
+
+                job["id"],
+
+                job["content_hash"],
+            ),
+        )
+
+
+    conn.commit()
+
+
+def increment_ai_attempt(
+    conn,
+    job_id: int,
+):
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            UPDATE jobs
+
+            SET
+                classification_attempts =
+                    classification_attempts + 1
+
+            WHERE id = %s
+            """,
+            (
+                job_id,
+            ),
+        )
+
+
+    conn.commit()
 
 
 def reset_changed_job(
     conn,
     job_id: int,
 ):
-    """
-    The job changed while AI was processing it.
-
-    Put the current database version back into
-    pending state so the worker can classify
-    the new content.
-    """
 
     with conn.cursor() as cur:
 
@@ -275,6 +384,7 @@ def reset_changed_job(
             ),
         )
 
+
     conn.commit()
 
 
@@ -283,17 +393,14 @@ def save_success(
     job: dict,
     classification,
 ):
-    """
-    Store AI classification only when the
-    job content is still identical to what
-    the AI classified.
-    """
 
     locations = [
         location.model_dump()
+
         for location
         in classification.additional_locations
     ]
+
 
     with conn.cursor() as cur:
 
@@ -312,9 +419,11 @@ def save_success(
 
                 seniority = %s,
 
-                years_experience_min = %s,
+                years_experience_min =
+                    %s,
 
-                years_experience_max = %s,
+                years_experience_max =
+                    %s,
 
                 ai_locations = %s,
 
@@ -337,7 +446,9 @@ def save_success(
                     NULL,
 
                 classification_error =
-                    NULL
+                    NULL,
+
+                is_us_job = TRUE
 
             WHERE
                 id = %s
@@ -377,30 +488,31 @@ def save_success(
             ),
         )
 
+
         updated_rows = (
             cur.rowcount
         )
 
+
     conn.commit()
+
 
     if updated_rows == 0:
 
         logging.warning(
-            (
-                "STALE RESULT | "
-                "job=%s | "
-                "job changed while AI "
-                "was processing it"
-            ),
+            "STALE RESULT | job=%s",
             job["id"],
         )
+
 
         reset_changed_job(
             conn,
             job["id"],
         )
 
+
         return False
+
 
     return True
 
@@ -410,14 +522,11 @@ def save_failure(
     job: dict,
     error: Exception,
 ):
-    """
-    Retry failed AI processing until
-    MAX_ATTEMPTS has been reached.
-    """
 
     error_message = (
         str(error)[:2000]
     )
+
 
     with conn.cursor() as cur:
 
@@ -448,7 +557,8 @@ def save_failure(
             WHERE
                 id = %s
 
-                AND content_hash = %s
+                AND content_hash =
+                    %s
             """,
             (
                 MAX_ATTEMPTS,
@@ -461,6 +571,7 @@ def save_failure(
             ),
         )
 
+
     conn.commit()
 
 
@@ -468,25 +579,96 @@ def process_job(
     conn,
     job: dict,
 ):
+
+    # ========================================================
+    # U.S. market gate
+    # ========================================================
+
+    decision = (
+        classify_us_job(
+            provider=(
+                job["provider"]
+            ),
+
+            location=(
+                job["location"]
+            ),
+
+            raw=(
+                job["raw_payload"]
+            ),
+        )
+    )
+
+
+    save_market_decision(
+        conn,
+        job,
+        decision.eligible,
+        decision.reason,
+    )
+
+
+    if not decision.eligible:
+
+        logging.info(
+            (
+                "SKIP NON-US | "
+                "id=%s | "
+                "location=%s | "
+                "reason=%s"
+            ),
+
+            job["id"],
+            job["location"],
+            decision.reason,
+        )
+
+
+        skip_non_us_job(
+            conn,
+            job,
+            decision.reason,
+        )
+
+
+        return "skipped_non_us"
+
+
+    # ========================================================
+    # U.S. job — now AI processing can start
+    # ========================================================
+
+    increment_ai_attempt(
+        conn,
+        job["id"],
+    )
+
+
     payload = (
         build_classifier_payload(
             job
         )
     )
 
+
     logging.info(
         (
-            "CLASSIFY | "
+            "CLASSIFY US | "
             "id=%s | "
             "provider=%s | "
             "posted_at=%s | "
+            "location=%s | "
             "title=%s"
         ),
+
         job["id"],
         job["provider"],
         job["posted_at"],
+        job["location"],
         job["title"],
     )
+
 
     classification = (
         classify_job(
@@ -494,21 +676,25 @@ def process_job(
         )
     )
 
-    saved = save_success(
-        conn,
-        job,
-        classification,
+
+    saved = (
+        save_success(
+            conn,
+            job,
+            classification,
+        )
     )
 
+
     if not saved:
-        return False
+        return "stale"
+
 
     logging.info(
         (
-            "READY | "
+            "READY US | "
             "id=%s | "
             "family=%s | "
-            "subfamily=%s | "
             "seniority=%s | "
             "confidence=%.2f"
         ),
@@ -517,40 +703,56 @@ def process_job(
 
         classification.job_family,
 
-        classification.job_subfamily,
-
         classification.seniority,
 
         classification.confidence,
     )
 
-    return True
+
+    return "ready"
 
 
 def main():
 
-    parser = argparse.ArgumentParser()
+    parser = (
+        argparse.ArgumentParser()
+    )
+
 
     parser.add_argument(
         "--limit",
+
         type=int,
+
         default=10,
+
         help=(
-            "Maximum number of fresh "
-            "jobs to classify this run"
+            "Maximum number of U.S. "
+            "jobs sent to AI"
         ),
     )
 
-    args = parser.parse_args()
+
+    args = (
+        parser.parse_args()
+    )
+
 
     if args.limit < 1:
+
         raise ValueError(
             "--limit must be at least 1"
         )
 
-    processed = 0
+
+    ai_processed = 0
+
     successful = 0
+
     failed = 0
+
+    skipped_non_us = 0
+
 
     with get_connection() as conn:
 
@@ -558,59 +760,80 @@ def main():
             conn
         )
 
-        pending_count = (
+
+        pending = (
             count_pending_fresh_jobs(
                 conn
             )
         )
 
-        logging.info(
-            (
-                "FRESH PENDING JOBS | "
-                "count=%s"
-            ),
-            pending_count,
-        )
 
         print(
-            "Fresh pending jobs:",
-            pending_count,
+            "Fresh pending candidates:",
+            pending,
         )
 
+
         while (
-            processed < args.limit
+            ai_processed
+            < args.limit
         ):
 
-            job = claim_next_job(
-                conn
+            job = (
+                claim_next_job(
+                    conn
+                )
             )
 
+
             if job is None:
-
-                logging.info(
-                    "No fresh pending jobs"
-                )
-
                 break
+
 
             try:
 
-                success = process_job(
-                    conn,
-                    job,
+                result = (
+                    process_job(
+                        conn,
+                        job,
+                    )
                 )
 
-                if success:
+
+                if (
+                    result ==
+                    "skipped_non_us"
+                ):
+
+                    skipped_non_us += 1
+
+                    continue
+
+
+                if result == "ready":
+
+                    ai_processed += 1
+
                     successful += 1
+
+
+                elif result == "stale":
+
+                    ai_processed += 1
+
 
             except Exception as exc:
 
+                ai_processed += 1
+
                 failed += 1
+
 
                 logging.exception(
                     "FAILED | id=%s",
                     job["id"],
                 )
+
 
                 save_failure(
                     conn,
@@ -618,32 +841,43 @@ def main():
                     exc,
                 )
 
-            processed += 1
 
     logging.info(
         (
             "WORKER COMPLETE | "
-            "processed=%s | "
+            "ai_processed=%s | "
             "successful=%s | "
-            "failed=%s"
+            "failed=%s | "
+            "skipped_non_us=%s"
         ),
-        processed,
+
+        ai_processed,
         successful,
         failed,
+        skipped_non_us,
     )
 
+
     print()
+
     print(
-        "Processed:",
-        processed,
+        "AI processed:",
+        ai_processed,
     )
+
     print(
         "Successful:",
         successful,
     )
+
     print(
         "Failed:",
         failed,
+    )
+
+    print(
+        "Skipped non-US:",
+        skipped_non_us,
     )
 
 

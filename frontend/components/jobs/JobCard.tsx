@@ -37,14 +37,14 @@ export function JobCard({ job, selected, saved, onSelect, onSave, onHide }: { jo
   return <article className={`${selected ? 'job-card-v2 selected' : 'job-card-v2'} ${cardTone(job)}`} onClick={onSelect} role="button" aria-label={`View details for ${jobLabel}`} tabIndex={0} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onSelect(); } }}>
     <div className="job-card-main-v3">
       <div className="job-card-top-v3"><time title={exact(job.createdAt)}><i />{ago(job.createdAt)}</time><div className="job-card-utilities-v3"><button type="button" title={saved ? 'Remove from saved jobs' : 'Save job'} aria-label={`${saved ? 'Unsave' : 'Save'} ${jobLabel}`} className={saved ? 'saved' : ''} onClick={(event) => { event.stopPropagation(); onSave(); }}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} /></button><button type="button" title="Hide job" aria-label={`Hide ${jobLabel}`} onClick={(event) => { event.stopPropagation(); onHide(); }}><EyeOff size={15} /></button></div></div>
-      <div className="company-identity-v3"><div><strong>{job.company}</strong><span>{job.jobFamily ? label(job.jobFamily) : 'Direct employer'}</span></div><div className="company-avatar-v2 compact" style={companyMark(job.company)} aria-hidden="true">{job.company.slice(0, 1).toUpperCase()}</div></div>
-      <h2>{job.title}</h2>
+      <strong className="job-card-company-v4">{job.company}</strong>
+      <div className="job-card-title-row-v4"><h2>{job.title}</h2><div className="company-avatar-v2 compact" style={companyMark(job.company)} aria-hidden="true">{job.company.slice(0, 1).toUpperCase()}</div></div>
       {metadata.length > 0 && <div className="job-meta-v3">{metadata.map((value) => <span key={value}>{label(value)}</span>)}</div>}
       {visibleSkills.length > 0 && <div className="job-skills-v3">{visibleSkills.map((skill) => <span key={skill}>{skill}</span>)}{remainingSkills > 0 && <span>+{remainingSkills}</span>}</div>}
     </div>
     <footer className="job-card-footer-v3">
-      <div className="job-card-facts-v3">{salary && <strong>{salary}</strong>}<span>{job.location || 'Location flexible'}</span></div>
-      <div className="job-card-action-row-v3"><small>via {label(job.provider || 'Company')}</small>{applyUrl ? <a href={applyUrl} target="_blank" rel="noopener noreferrer" aria-label={`Apply to ${jobLabel}`} onClick={(event) => event.stopPropagation()}>Apply <ExternalLink size={13} /></a> : <button type="button" aria-label={`View details for ${jobLabel}`} onClick={(event) => { event.stopPropagation(); onSelect(); }}>View details</button>}</div>
+      <div className="job-card-facts-v3">{salary && <strong>{salary}</strong>}<span>{job.location || 'Location flexible'} <small>· via {label(job.provider || 'Company')}</small></span></div>
+      <div className="job-card-cta-v4">{applyUrl ? <a href={applyUrl} target="_blank" rel="noopener noreferrer" aria-label={`Apply to ${jobLabel}`} onClick={(event) => event.stopPropagation()}>Apply <ExternalLink size={13} /></a> : <button type="button" aria-label={`View details for ${jobLabel}`} onClick={(event) => { event.stopPropagation(); onSelect(); }}>View details</button>}</div>
     </footer>
   </article>;
 }
