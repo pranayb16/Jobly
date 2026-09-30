@@ -1,0 +1,17 @@
+{
+  "jobs": [
+    {
+      "id": "ashby-202",
+      "title": "Data Analyst",
+      "location": "New York, NY",
+      "employmentType": "FullTime",
+      "workplaceType": "Hybrid",
+      "publishedAt": "2026-09-29T15:00:00Z",
+      "descriptionHtml": "<p>Analyze product data.</p>",
+      "descriptionPlain": "Analyze product data.",
+      "jobUrl": "https://example.test/jobs/202",
+      "applyUrl": "https://example.test/jobs/202/apply",
+      "address": {"postalAddress": {"addressCountry": "US"}}
+    }
+  ]
+}

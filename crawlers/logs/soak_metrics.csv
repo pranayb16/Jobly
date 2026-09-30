@@ -1,2 +1,0 @@
-cycle,timestamp,active_sources,total_jobs,active_jobs,removed_jobs,fresh_jobs,fresh_pending,fresh_ready,fresh_failed,public_jobs,failing_sources,max_source_failures,crawl_successes,crawl_failures
-1,2026-09-29T21:21:15.999828+00:00,13969,4429,4423,6,69,44,25,0,25,0,0,0,0

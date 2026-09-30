@@ -1,0 +1,2 @@
+"""ATS provider adapters."""
+

@@ -1,0 +1,15 @@
+{
+  "jobs": [
+    {
+      "id": 101,
+      "title": "Software Engineer",
+      "company_name": "Example Co",
+      "location": {"name": "Chicago, IL"},
+      "first_published": "2026-09-29T14:00:00Z",
+      "content": "&lt;p&gt;Build reliable services.&lt;/p&gt;",
+      "absolute_url": "https://example.test/jobs/101",
+      "departments": [{"name": "Engineering"}],
+      "offices": [{"name": "Chicago", "location": "Chicago, IL"}]
+    }
+  ]
+}

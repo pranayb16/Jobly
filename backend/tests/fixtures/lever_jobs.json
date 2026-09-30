@@ -1,0 +1,16 @@
+[
+  {
+    "id": "lever-303",
+    "text": "Customer Success Manager",
+    "categories": {
+      "location": "Austin, TX",
+      "commitment": "Full-time",
+      "department": "Customer Success"
+    },
+    "workplaceType": "hybrid",
+    "description": "<p>Help customers succeed.</p>",
+    "descriptionPlain": "Help customers succeed.",
+    "hostedUrl": "https://example.test/jobs/303",
+    "applyUrl": "https://example.test/jobs/303/apply"
+  }
+]
