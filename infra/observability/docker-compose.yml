@@ -1,0 +1,82 @@
+services:
+
+  loki:
+    image: grafana/loki:3.7.0
+    container_name: jobly-loki
+
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+
+    ports:
+      - "127.0.0.1:3100:3100"
+
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+    restart: unless-stopped
+
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: jobly-alloy
+
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+
+    ports:
+      - "127.0.0.1:12345:12345"
+
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+
+      # Jobly logs directory
+      - ../../logs:/var/log/jobly:ro
+
+      # Keeps Alloy file positions across restarts
+      - alloy-data:/var/lib/alloy/data
+
+    depends_on:
+      - loki
+
+    restart: unless-stopped
+
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: jobly-grafana
+
+    ports:
+      - "127.0.0.1:3001:3000"
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+
+    depends_on:
+      - loki
+
+    restart: unless-stopped
+
+
+volumes:
+
+  loki-data:
+
+  alloy-data:
+
+  grafana-data:

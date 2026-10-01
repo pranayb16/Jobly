@@ -8,22 +8,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from jobly.db.connection import get_connection
+from dotenv import load_dotenv
 
 
 # ============================================================
-# Configuration
-# ============================================================
-
-SOAK_HOURS = 48
-
-CRAWL_INTERVAL_HOURS = 3
-
-AI_LIMIT_PER_CYCLE = 500
-
-
-# ============================================================
-# Paths
+# Repository paths
 # ============================================================
 
 REPO_ROOT = (
@@ -32,7 +21,92 @@ REPO_ROOT = (
     .parents[1]
 )
 
-BACKEND_ROOT = REPO_ROOT / "backend"
+BACKEND_ROOT = (
+    REPO_ROOT
+    / "backend"
+)
+
+
+# ============================================================
+# Make backend/jobly importable
+# ============================================================
+
+backend_path = str(
+    BACKEND_ROOT
+)
+
+if backend_path not in sys.path:
+    sys.path.insert(
+        0,
+        backend_path,
+    )
+
+
+# Import after backend is added to sys.path
+from jobly.db.connection import get_connection  # noqa: E402
+
+
+# ============================================================
+# Load .env
+# ============================================================
+
+load_dotenv(
+    REPO_ROOT / ".env"
+)
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
+# Total amount of time this soak test should run.
+#
+# Default:
+# 168 hours = 7 days
+SOAK_HOURS = int(
+    os.getenv(
+        "SOAK_HOURS",
+        "168",
+    )
+)
+
+
+# How often to start the complete pipeline.
+#
+# 8 hours = 3 runs/day
+CRAWL_INTERVAL_HOURS = int(
+    os.getenv(
+        "CRAWL_INTERVAL_HOURS",
+        "8",
+    )
+)
+
+
+# Maximum number of fresh U.S. jobs
+# sent to Gemini each pipeline cycle.
+AI_LIMIT_PER_CYCLE = int(
+    os.getenv(
+        "AI_LIMIT_PER_CYCLE",
+        "500",
+    )
+)
+
+
+# Used only for logging.
+#
+# The actual source target is consumed by
+# jobly.commands.pipeline from .env.
+CRAWL_SOURCE_LIMIT = int(
+    os.getenv(
+        "CRAWL_SOURCE_LIMIT",
+        "50",
+    )
+)
+
+
+# ============================================================
+# Log paths
+# ============================================================
 
 LOG_DIR = (
     REPO_ROOT
@@ -44,10 +118,12 @@ LOG_DIR.mkdir(
     exist_ok=True,
 )
 
+
 SOAK_LOG = (
     LOG_DIR
     / "soak.log"
 )
+
 
 METRICS_FILE = (
     LOG_DIR
@@ -82,15 +158,22 @@ logging.basicConfig(
 
 
 # ============================================================
-# Subprocess environment
+# Child-process environment
 # ============================================================
 
 def build_subprocess_env() -> dict:
     """
-    Ensure child Python processes can import the installed-style `jobly` package.
+    Build the environment passed to pipeline subprocesses.
+
+    This makes sure:
+    - .env variables are available
+    - backend/jobly can be imported
     """
 
-    env = os.environ.copy()
+    env = (
+        os.environ.copy()
+    )
+
 
     existing_pythonpath = (
         env.get(
@@ -99,9 +182,6 @@ def build_subprocess_env() -> dict:
         )
     )
 
-    backend_path = str(
-        BACKEND_ROOT
-    )
 
     if existing_pythonpath:
 
@@ -117,17 +197,28 @@ def build_subprocess_env() -> dict:
             backend_path
         )
 
+
     return env
 
 
 # ============================================================
-# Commands
+# Run external command
 # ============================================================
 
 def run_command(
     name: str,
     command: list[str],
 ) -> bool:
+    """
+    Run one subprocess and wait for it to finish.
+
+    Returns:
+        True  -> command succeeded
+        False -> command failed
+
+    The soak runner will not start another cycle while this
+    command is still running.
+    """
 
     logging.info(
         "START | %s",
@@ -135,13 +226,20 @@ def run_command(
     )
 
     logging.info(
+        "COMMAND | %s",
+        " ".join(command),
+    )
+
+    logging.info(
         "WORKING DIRECTORY | %s",
         REPO_ROOT,
     )
 
+
     started = (
         time.monotonic()
     )
+
 
     try:
 
@@ -161,13 +259,16 @@ def run_command(
             text=True,
         )
 
+
         duration = (
             time.monotonic()
             - started
         )
 
+
         if (
-            result.returncode == 0
+            result.returncode
+            == 0
         ):
 
             logging.info(
@@ -175,6 +276,7 @@ def run_command(
                     "SUCCESS | %s | "
                     "duration=%.1fs"
                 ),
+
                 name,
                 duration,
             )
@@ -190,9 +292,7 @@ def run_command(
             ),
 
             name,
-
             result.returncode,
-
             duration,
         )
 
@@ -214,6 +314,9 @@ def run_command(
 # ============================================================
 
 def collect_metrics() -> dict:
+    """
+    Collect useful state after every complete pipeline cycle.
+    """
 
     with get_connection() as conn:
 
@@ -226,14 +329,29 @@ def collect_metrics() -> dict:
             cur.execute(
                 """
                 SELECT COUNT(*)
-
                 FROM sources
-
                 WHERE status = 'active'
                 """
             )
 
             active_sources = (
+                cur.fetchone()[0]
+            )
+
+
+            # ------------------------------------------------
+            # Invalid sources
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM sources
+                WHERE status = 'invalid'
+                """
+            )
+
+            invalid_sources = (
                 cur.fetchone()[0]
             )
 
@@ -245,7 +363,6 @@ def collect_metrics() -> dict:
             cur.execute(
                 """
                 SELECT COUNT(*)
-
                 FROM jobs
                 """
             )
@@ -262,9 +379,7 @@ def collect_metrics() -> dict:
             cur.execute(
                 """
                 SELECT COUNT(*)
-
                 FROM jobs
-
                 WHERE active = TRUE
                 """
             )
@@ -275,15 +390,13 @@ def collect_metrics() -> dict:
 
 
             # ------------------------------------------------
-            # Removed jobs
+            # Removed / inactive jobs
             # ------------------------------------------------
 
             cur.execute(
                 """
                 SELECT COUNT(*)
-
                 FROM jobs
-
                 WHERE active = FALSE
                 """
             )
@@ -294,7 +407,7 @@ def collect_metrics() -> dict:
 
 
             # ------------------------------------------------
-            # Fresh jobs
+            # Fresh jobs: last 48 hours
             # ------------------------------------------------
 
             cur.execute(
@@ -344,6 +457,35 @@ def collect_metrics() -> dict:
             )
 
             fresh_pending = (
+                cur.fetchone()[0]
+            )
+
+
+            # ------------------------------------------------
+            # Fresh processing AI jobs
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+
+                FROM jobs
+
+                WHERE
+                    active = TRUE
+
+                    AND posted_at IS NOT NULL
+
+                    AND posted_at >=
+                        NOW()
+                        - INTERVAL '48 hours'
+
+                    AND classification_status =
+                        'processing'
+                """
+            )
+
+            fresh_processing = (
                 cur.fetchone()[0]
             )
 
@@ -407,13 +549,41 @@ def collect_metrics() -> dict:
 
 
             # ------------------------------------------------
-            # Public jobs
+            # Fresh non-US jobs skipped before Gemini
             # ------------------------------------------------
 
             cur.execute(
                 """
                 SELECT COUNT(*)
 
+                FROM jobs
+
+                WHERE
+                    active = TRUE
+
+                    AND posted_at IS NOT NULL
+
+                    AND posted_at >=
+                        NOW()
+                        - INTERVAL '48 hours'
+
+                    AND classification_status =
+                        'skipped_non_us'
+                """
+            )
+
+            fresh_non_us = (
+                cur.fetchone()[0]
+            )
+
+
+            # ------------------------------------------------
+            # Public jobs
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
                 FROM public_jobs
                 """
             )
@@ -424,7 +594,7 @@ def collect_metrics() -> dict:
 
 
             # ------------------------------------------------
-            # Sources currently failing
+            # Sources with at least one crawl failure
             # ------------------------------------------------
 
             cur.execute(
@@ -444,7 +614,7 @@ def collect_metrics() -> dict:
 
 
             # ------------------------------------------------
-            # Highest source failure count
+            # Highest consecutive failure count
             # ------------------------------------------------
 
             cur.execute(
@@ -467,31 +637,23 @@ def collect_metrics() -> dict:
 
 
             # ------------------------------------------------
-            # Crawl activity over last 4 hours
+            # Total crawl runs
             # ------------------------------------------------
 
             cur.execute(
                 """
                 SELECT
-
                     COUNT(*)
                     FILTER (
-                        WHERE
-                            status = 'success'
+                        WHERE status = 'success'
                     ),
 
                     COUNT(*)
                     FILTER (
-                        WHERE
-                            status = 'failed'
+                        WHERE status = 'failed'
                     )
 
                 FROM crawl_runs
-
-                WHERE
-                    started_at >=
-                        NOW()
-                        - INTERVAL '4 hours'
                 """
             )
 
@@ -499,11 +661,11 @@ def collect_metrics() -> dict:
                 cur.fetchone()
             )
 
-            crawl_successes = (
+            total_crawl_successes = (
                 crawl_row[0]
             )
 
-            crawl_failures = (
+            total_crawl_failures = (
                 crawl_row[1]
             )
 
@@ -515,8 +677,14 @@ def collect_metrics() -> dict:
             ).isoformat()
         ),
 
+        "source_target":
+            CRAWL_SOURCE_LIMIT,
+
         "active_sources":
             active_sources,
+
+        "invalid_sources":
+            invalid_sources,
 
         "total_jobs":
             total_jobs,
@@ -533,11 +701,17 @@ def collect_metrics() -> dict:
         "fresh_pending":
             fresh_pending,
 
+        "fresh_processing":
+            fresh_processing,
+
         "fresh_ready":
             fresh_ready,
 
         "fresh_failed":
             fresh_failed,
+
+        "fresh_non_us":
+            fresh_non_us,
 
         "public_jobs":
             public_jobs,
@@ -548,11 +722,11 @@ def collect_metrics() -> dict:
         "max_source_failures":
             max_source_failures,
 
-        "crawl_successes":
-            crawl_successes,
+        "total_crawl_successes":
+            total_crawl_successes,
 
-        "crawl_failures":
-            crawl_failures,
+        "total_crawl_failures":
+            total_crawl_failures,
     }
 
 
@@ -564,15 +738,20 @@ def save_metrics(
     cycle: int,
     metrics: dict,
 ):
+    """
+    Append one row to logs/soak_metrics.csv.
+    """
 
     row = {
         "cycle": cycle,
         **metrics,
     }
 
+
     file_exists = (
         METRICS_FILE.exists()
     )
+
 
     with METRICS_FILE.open(
         "a",
@@ -587,8 +766,11 @@ def save_metrics(
             )
         )
 
+
         if not file_exists:
+
             writer.writeheader()
+
 
         writer.writerow(
             row
@@ -603,29 +785,45 @@ def log_metrics(
     cycle: int,
     metrics: dict,
 ):
+    """
+    Print the most important system state after each cycle.
+    """
 
     logging.info(
         (
             "METRICS | "
             "cycle=%s | "
-            "sources=%s | "
-            "jobs=%s | "
-            "active=%s | "
-            "removed=%s | "
-            "fresh=%s | "
+            "source_target=%s | "
+            "active_sources=%s | "
+            "invalid_sources=%s | "
+            "total_jobs=%s | "
+            "active_jobs=%s | "
+            "removed_jobs=%s | "
+            "fresh_jobs=%s | "
             "ready=%s | "
             "pending=%s | "
+            "processing=%s | "
             "ai_failed=%s | "
+            "non_us=%s | "
             "public=%s | "
-            "source_failures=%s | "
-            "crawl_success=%s | "
-            "crawl_failed=%s"
+            "failing_sources=%s | "
+            "max_source_failures=%s | "
+            "crawl_success_total=%s | "
+            "crawl_failed_total=%s"
         ),
 
         cycle,
 
         metrics[
+            "source_target"
+        ],
+
+        metrics[
             "active_sources"
+        ],
+
+        metrics[
+            "invalid_sources"
         ],
 
         metrics[
@@ -653,7 +851,15 @@ def log_metrics(
         ],
 
         metrics[
+            "fresh_processing"
+        ],
+
+        metrics[
             "fresh_failed"
+        ],
+
+        metrics[
+            "fresh_non_us"
         ],
 
         metrics[
@@ -665,22 +871,48 @@ def log_metrics(
         ],
 
         metrics[
-            "crawl_successes"
+            "max_source_failures"
         ],
 
         metrics[
-            "crawl_failures"
+            "total_crawl_successes"
+        ],
+
+        metrics[
+            "total_crawl_failures"
         ],
     )
 
 
 # ============================================================
-# One complete cycle
+# One complete pipeline cycle
 # ============================================================
 
 def run_cycle(
     cycle: int,
 ):
+    """
+    Run one FULL Jobly pipeline.
+
+    The pipeline is responsible for:
+
+        1. database migrations
+        2. checking source target
+        3. loading additional CSV sources if needed
+        4. validating those new ATS sources
+        5. inserting usable sources into PostgreSQL
+        6. crawling CRAWL_SOURCE_LIMIT sources
+        7. normalizing and storing jobs
+        8. marking new/changed jobs pending
+        9. U.S. eligibility filtering
+       10. Gemini enrichment
+       11. publishing ready jobs through public_jobs
+
+    dev_soak.py does NOT implement those steps itself.
+
+    Its only responsibility is:
+        run pipeline -> metrics -> sleep -> repeat.
+    """
 
     logging.info(
         "========================================"
@@ -696,38 +928,26 @@ def run_cycle(
     )
 
 
-    # --------------------------------------------------------
-    # Crawl first 50 sources
-    # --------------------------------------------------------
-
-    crawl_ok = (
-        run_command(
-            "crawler",
-
-            [
-                sys.executable,
-                "-m",
-                "jobly.commands.crawl",
-            ],
-        )
+    cycle_started = (
+        time.monotonic()
     )
 
 
     # --------------------------------------------------------
-    # Run AI after crawler
+    # Complete Jobly pipeline
     # --------------------------------------------------------
 
-    ai_ok = (
+    pipeline_ok = (
         run_command(
-            "AI enrichment",
+            "pipeline",
 
             [
                 sys.executable,
+
                 "-m",
-                "jobly.commands.enrich",
+                "jobly.commands.pipeline",
 
-                "--limit",
-
+                "--enrichment-limit",
                 str(
                     AI_LIMIT_PER_CYCLE
                 ),
@@ -737,7 +957,7 @@ def run_cycle(
 
 
     # --------------------------------------------------------
-    # Record DB state
+    # Collect DB metrics regardless of pipeline result
     # --------------------------------------------------------
 
     try:
@@ -746,15 +966,18 @@ def run_cycle(
             collect_metrics()
         )
 
+
         save_metrics(
             cycle,
             metrics,
         )
 
+
         log_metrics(
             cycle,
             metrics,
         )
+
 
     except Exception:
 
@@ -763,40 +986,75 @@ def run_cycle(
         )
 
 
+    # --------------------------------------------------------
+    # Final cycle status
+    # --------------------------------------------------------
+
+    duration = (
+        time.monotonic()
+        - cycle_started
+    )
+
+
     logging.info(
         (
             "CYCLE %s COMPLETE | "
-            "crawler=%s | "
-            "ai=%s"
+            "pipeline=%s | "
+            "duration=%.1fs"
         ),
 
         cycle,
 
         (
             "ok"
-            if crawl_ok
+            if pipeline_ok
             else "failed"
         ),
 
-        (
-            "ok"
-            if ai_ok
-            else "failed"
-        ),
+        duration,
     )
 
 
 # ============================================================
-# Main
+# Main soak loop
 # ============================================================
 
 def main():
+
+    if SOAK_HOURS < 1:
+
+        raise ValueError(
+            "SOAK_HOURS must be at least 1"
+        )
+
+
+    if CRAWL_INTERVAL_HOURS < 1:
+
+        raise ValueError(
+            "CRAWL_INTERVAL_HOURS must be at least 1"
+        )
+
+
+    if AI_LIMIT_PER_CYCLE < 1:
+
+        raise ValueError(
+            "AI_LIMIT_PER_CYCLE must be at least 1"
+        )
+
+
+    if CRAWL_SOURCE_LIMIT < 1:
+
+        raise ValueError(
+            "CRAWL_SOURCE_LIMIT must be at least 1"
+        )
+
 
     duration_seconds = (
         SOAK_HOURS
         * 60
         * 60
     )
+
 
     interval_seconds = (
         CRAWL_INTERVAL_HOURS
@@ -809,6 +1067,7 @@ def main():
         time.monotonic()
     )
 
+
     soak_ends = (
         soak_started
         + duration_seconds
@@ -816,28 +1075,59 @@ def main():
 
 
     logging.info(
+        "========================================"
+    )
+
+    logging.info(
         "JOBLY LOCAL SOAK START"
     )
+
+    logging.info(
+        "========================================"
+    )
+
 
     logging.info(
         "Repository root: %s",
         REPO_ROOT,
     )
 
+
+    logging.info(
+        "Backend root: %s",
+        BACKEND_ROOT,
+    )
+
+
     logging.info(
         "Duration: %s hours",
         SOAK_HOURS,
     )
 
+
     logging.info(
-        "Interval: %s hours",
+        "Pipeline interval: %s hours",
         CRAWL_INTERVAL_HOURS,
     )
+
+
+    logging.info(
+        "Source target: %s",
+        CRAWL_SOURCE_LIMIT,
+    )
+
 
     logging.info(
         "AI limit/cycle: %s",
         AI_LIMIT_PER_CYCLE,
     )
+
+
+    logging.info(
+        "Log file: %s",
+        SOAK_LOG,
+    )
+
 
     logging.info(
         "Metrics file: %s",
@@ -855,10 +1145,18 @@ def main():
             < soak_ends
         ):
 
+            # ------------------------------------------------
+            # Remember when this cycle was scheduled from
+            # ------------------------------------------------
+
             cycle_started = (
                 time.monotonic()
             )
 
+
+            # ------------------------------------------------
+            # Run full pipeline
+            # ------------------------------------------------
 
             run_cycle(
                 cycle
@@ -868,12 +1166,34 @@ def main():
             cycle += 1
 
 
+            # ------------------------------------------------
+            # Stop if soak duration has expired
+            # ------------------------------------------------
+
             if (
                 time.monotonic()
                 >= soak_ends
             ):
+
                 break
 
+
+            # ------------------------------------------------
+            # Target next run based on previous cycle START
+            #
+            # Example:
+            #
+            # cycle starts 8:00
+            # next target 16:00
+            #
+            # If crawl takes 2 hours:
+            # sleep ~6 hours
+            #
+            # If crawl takes >8 hours:
+            # sleep = 0 and next cycle starts immediately.
+            #
+            # This prevents overlapping pipelines.
+            # ------------------------------------------------
 
             next_cycle = (
                 cycle_started
@@ -888,6 +1208,10 @@ def main():
             )
 
 
+            # ------------------------------------------------
+            # Do not sleep beyond the total soak duration
+            # ------------------------------------------------
+
             remaining_seconds = (
                 soak_ends
                 - time.monotonic()
@@ -900,20 +1224,35 @@ def main():
             )
 
 
-            logging.info(
-                (
-                    "Sleeping %.1f minutes "
-                    "until next cycle"
-                ),
-
+            if (
                 sleep_seconds
-                / 60,
-            )
+                > 0
+            ):
+
+                logging.info(
+                    (
+                        "Sleeping %.1f minutes "
+                        "until next pipeline cycle"
+                    ),
+
+                    sleep_seconds
+                    / 60,
+                )
 
 
-            time.sleep(
-                sleep_seconds
-            )
+                time.sleep(
+                    sleep_seconds
+                )
+
+            else:
+
+                logging.warning(
+                    (
+                        "Previous cycle consumed "
+                        "the full interval; "
+                        "starting next cycle immediately"
+                    )
+                )
 
 
     except KeyboardInterrupt:
@@ -923,8 +1262,29 @@ def main():
         )
 
 
+    total_duration = (
+        time.monotonic()
+        - soak_started
+    )
+
+
     logging.info(
-        "JOBLY LOCAL SOAK COMPLETE"
+        "========================================"
+    )
+
+    logging.info(
+        (
+            "JOBLY LOCAL SOAK COMPLETE | "
+            "duration=%.1f hours"
+        ),
+
+        total_duration
+        / 60
+        / 60,
+    )
+
+    logging.info(
+        "========================================"
     )
 
 
