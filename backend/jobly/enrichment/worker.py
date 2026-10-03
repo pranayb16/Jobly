@@ -41,9 +41,8 @@ from jobly.enrichment.input_builder import (
 )
 
 from jobly.enrichment.schemas_v3 import (
-
+    EnrichedLocationV3,
     JobEnrichmentV3,
-
 )
 
 
@@ -179,243 +178,167 @@ def count_backlog(
         return cur.fetchone()[0]
 
 
-
-
-
 def claim_next_queue_item(
-
     conn,
-
+    excluded_queue_ids: set[int] | None = None,
 ) -> dict | None:
-
     settings = get_settings()
 
-
+    excluded_queue_ids = (
+        excluded_queue_ids
+        or set()
+    )
 
     with conn.cursor(
-
         row_factory=dict_row
-
     ) as cur:
 
-        cur.execute(
+        if excluded_queue_ids:
 
-            """
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    job_id,
+                    content_hash,
+                    priority,
+                    reason,
+                    attempts
 
-            SELECT
+                FROM enrichment_queue
 
-                id,
+                WHERE status = 'pending'
+                  AND attempts < %s
+                  AND NOT (
+                      id = ANY(%s::bigint[])
+                  )
 
-                job_id,
+                ORDER BY
+                    priority ASC,
+                    created_at ASC,
+                    id ASC
 
-                content_hash,
+                FOR UPDATE SKIP LOCKED
 
-                priority,
+                LIMIT 1
+                """,
+                (
+                    settings.ai_max_attempts,
+                    list(excluded_queue_ids),
+                ),
+            )
 
-                reason,
+        else:
 
-                attempts
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    job_id,
+                    content_hash,
+                    priority,
+                    reason,
+                    attempts
 
+                FROM enrichment_queue
 
+                WHERE status = 'pending'
+                  AND attempts < %s
 
-            FROM enrichment_queue
+                ORDER BY
+                    priority ASC,
+                    created_at ASC,
+                    id ASC
 
+                FOR UPDATE SKIP LOCKED
 
-
-            WHERE status = 'pending'
-
-              AND attempts < %s
-
-
-
-            ORDER BY
-
-                priority ASC,
-
-                created_at ASC,
-
-                id ASC
-
-
-
-            FOR UPDATE SKIP LOCKED
-
-
-
-            LIMIT 1
-
-            """,
-
-            (
-
-                settings.ai_max_attempts,
-
-            ),
-
-        )
-
-
+                LIMIT 1
+                """,
+                (
+                    settings.ai_max_attempts,
+                ),
+            )
 
         queue_item = cur.fetchone()
 
-
-
         if queue_item is None:
-
             conn.commit()
-
             return None
 
-
-
         cur.execute(
-
             """
-
             UPDATE enrichment_queue
 
             SET
-
                 status = 'processing',
-
                 started_at = NOW(),
-
                 attempts = attempts + 1,
-
                 last_error = NULL
-
-
 
             WHERE id = %s
 
-
-
             RETURNING attempts
-
             """,
-
             (
-
                 queue_item["id"],
-
             ),
-
         )
-
-
 
         queue_item["attempts"] = (
-
             cur.fetchone()["attempts"]
-
         )
 
-
-
         cur.execute(
-
             """
-
             SELECT
-
                 id,
-
                 external_job_id,
-
                 provider,
-
                 company,
-
                 title,
-
                 location,
-
                 employment_type,
-
                 workplace_type,
-
                 posted_at,
-
                 posted_at_source,
-
                 description_text,
-
                 raw_payload,
-
                 content_hash
-
-
 
             FROM jobs
 
-
-
             WHERE id = %s
-
             """,
-
             (
-
                 queue_item["job_id"],
-
             ),
-
         )
-
-
 
         job = cur.fetchone()
 
-
-
     conn.commit()
 
-
-
     if job is None:
-
         return None
 
-
-
     return {
-
         **job,
 
-
-
         "queue_id":
-
             queue_item["id"],
 
-
-
         "queue_hash":
-
             queue_item["content_hash"],
 
-
-
         "queue_attempts":
-
             queue_item["attempts"],
 
-
-
         "queue_reason":
-
             queue_item["reason"],
 
-
-
         "queue_priority":
-
             queue_item["priority"],
-
     }
-
-
-
 
 
 def _complete_queue(
@@ -601,45 +524,6 @@ def _unique_strings(
 
 
 
-
-def _unique_strings(
-
-    values: list[str],
-
-) -> list[str]:
-
-    result: list[str] = []
-
-
-
-    for value in values:
-
-        cleaned = " ".join(
-
-            value.strip().split()
-
-        )
-
-
-
-        if (
-
-            cleaned
-
-            and cleaned not in result
-
-        ):
-
-            result.append(cleaned)
-
-
-
-    return result
-
-
-
-
-
 def _location_dict(
 
     location,
@@ -692,7 +576,325 @@ def _location_dict(
 
     }
 
+def _normalize_employment_type(
+    value,
+) -> str | None:
 
+    if not value:
+        return None
+
+    normalized = (
+        str(value)
+        .strip()
+        .lower()
+        .replace("-", "")
+        .replace("_", "")
+        .replace(" ", "")
+    )
+
+    mapping = {
+        "fulltime": "full_time",
+        "parttime": "part_time",
+        "contract": "contract",
+        "contractor": "contract",
+        "temporary": "temporary",
+        "temp": "temporary",
+        "intern": "internship",
+        "internship": "internship",
+        "seasonal": "seasonal",
+    }
+
+    return mapping.get(
+        normalized
+    )
+
+
+def _normalize_workplace_type(
+    value,
+) -> str | None:
+
+    if not value:
+        return None
+
+    normalized = (
+        str(value)
+        .strip()
+        .lower()
+        .replace("-", "")
+        .replace("_", "")
+        .replace(" ", "")
+    )
+
+    mapping = {
+        "remote": "remote",
+        "hybrid": "hybrid",
+        "onsite": "onsite",
+        "onlocation": "onsite",
+        "inoffice": "onsite",
+        "office": "onsite",
+        "flexible": "flexible",
+    }
+
+    return mapping.get(
+        normalized
+    )
+
+
+def _country_code(
+    country: str | None,
+) -> str | None:
+
+    if not country:
+        return None
+
+    normalized = (
+        country
+        .strip()
+        .lower()
+    )
+
+    if normalized in {
+        "united states",
+        "united states of america",
+        "usa",
+        "us",
+        "u.s.",
+    }:
+        return "US"
+
+    return None
+
+
+def _simple_location_label(
+    value: str | None,
+) -> str | None:
+
+    if not value:
+        return None
+
+    cleaned = " ".join(
+        str(value)
+        .strip()
+        .split()
+    )
+
+    if not cleaned:
+        return None
+
+    if cleaned.lower() in {
+        "remote",
+        "hybrid",
+        "onsite",
+        "on-site",
+        "anywhere",
+    }:
+        return None
+
+    return cleaned
+
+
+def _ashby_ats_locations(
+    item: dict,
+) -> list[EnrichedLocationV3]:
+
+    raw = (
+        item.get("raw_payload")
+        or {}
+    )
+
+    if (
+        str(item.get("provider") or "")
+        .lower()
+        != "ashby"
+    ):
+        return []
+
+    result: list[
+        EnrichedLocationV3
+    ] = []
+
+
+    def add_location(
+        *,
+        label=None,
+        address=None,
+    ) -> None:
+
+        address = (
+            address
+            if isinstance(address, dict)
+            else {}
+        )
+
+        postal = (
+            address.get(
+                "postalAddress",
+                address,
+            )
+        )
+
+        if not isinstance(
+            postal,
+            dict,
+        ):
+            postal = {}
+
+        city = (
+            _simple_location_label(
+                label
+            )
+            or postal.get(
+                "addressLocality"
+            )
+        )
+
+        state = postal.get(
+            "addressRegion"
+        )
+
+        country = postal.get(
+            "addressCountry"
+        )
+
+        if not any(
+            (
+                city,
+                state,
+                country,
+            )
+        ):
+            return
+
+        result.append(
+            EnrichedLocationV3(
+                city=city,
+                state=state,
+                country=country,
+                country_code=(
+                    _country_code(
+                        country
+                    )
+                ),
+            )
+        )
+
+
+    # Primary Ashby location.
+    add_location(
+        label=item.get("location"),
+        address=raw.get("address"),
+    )
+
+
+    # Ashby can have multiple secondary locations.
+    for secondary in raw.get(
+        "secondaryLocations",
+        [],
+    ):
+
+        if not isinstance(
+            secondary,
+            dict,
+        ):
+            continue
+
+        add_location(
+            label=secondary.get(
+                "location"
+            ),
+            address=secondary.get(
+                "address"
+            ),
+        )
+
+    return result
+
+
+def _locations_match(
+    left: EnrichedLocationV3,
+    right: EnrichedLocationV3,
+) -> bool:
+
+    left_city = (
+        left.city or ""
+    ).strip().lower()
+
+    right_city = (
+        right.city or ""
+    ).strip().lower()
+
+    if (
+        left_city
+        and right_city
+        and left_city != right_city
+    ):
+        return False
+
+    left_state = (
+        left.state or ""
+    ).strip().lower()
+
+    right_state = (
+        right.state or ""
+    ).strip().lower()
+
+    if (
+        left_state
+        and right_state
+        and left_state != right_state
+    ):
+        return False
+
+    left_country = (
+        left.country or ""
+    ).strip().lower()
+
+    right_country = (
+        right.country or ""
+    ).strip().lower()
+
+    if (
+        left_country
+        and right_country
+        and left_country != right_country
+    ):
+        return False
+
+    return bool(
+        left_city
+        or right_city
+        or left_state
+        or right_state
+        or left_country
+        or right_country
+    )
+
+
+def _merge_locations(
+    ai_locations: list[EnrichedLocationV3],
+    ats_locations: list[EnrichedLocationV3],
+) -> list[EnrichedLocationV3]:
+
+    result = list(
+        ai_locations
+    )
+
+    for ats_location in ats_locations:
+
+        duplicate = any(
+            _locations_match(
+                existing,
+                ats_location,
+            )
+            for existing in result
+        )
+
+        if not duplicate:
+            result.append(
+                ats_location
+            )
+
+    return result
 
 
 
@@ -711,46 +913,36 @@ def _build_canonical_projection(
     ):
 
         required_skills = [
-
-            skill
-
-            for skill, requirement
-
-            in classification.skills.items()
-
-            if requirement == "required"
-
+            skill.name
+            for skill
+            in classification.skills
+            if skill.requirement == "required"
         ]
 
 
 
         preferred_skills = [
-
-            skill
-
-            for skill, requirement
-
-            in classification.skills.items()
-
-            if requirement == "preferred"
-
+            skill.name
+            for skill
+            in classification.skills
+            if skill.requirement == "preferred"
         ]
 
 
 
-        skills = list(
+        skills = [
+            skill.name
+            for skill
+            in classification.skills
+        ]
 
-            classification.skills.keys()
-
-        )
 
 
-
-        certifications = list(
-
-            classification.certifications.keys()
-
-        )
+        certifications = [
+            certification.name
+            for certification
+            in classification.certifications
+        ]
 
 
 
@@ -1669,8 +1861,10 @@ def save_success(
 
 
             "model":
-
-                settings.openrouter_paid_model,
+                (
+                usage.model
+                or settings.openrouter_paid_model
+            ),
 
 
 
@@ -2993,135 +3187,90 @@ def save_failure(
 
 
 
-
 def process_item(
-
     conn,
-
     item: dict,
-
 ) -> tuple[str, GeminiUsage | None]:
 
     if (
-
         item["content_hash"]
-
         != item["queue_hash"]
-
     ):
 
         _complete_queue(
-
             conn,
-
             item["queue_id"],
-
             "stale_content_hash",
-
         )
-
-
 
         return "stale", None
 
 
-
     decision = classify_us_job(
-
         provider=item["provider"],
-
         location=item["location"],
-
         raw=item["raw_payload"],
-
     )
-
 
 
     if not decision.eligible:
 
         _mark_non_us(
-
             conn,
-
             item,
-
             decision.reason,
-
         )
 
-
-
         return "skipped_non_us", None
-
 
 
     with conn.cursor() as cur:
 
         cur.execute(
-
             """
-
             UPDATE jobs
-
             SET
-
                 is_us_job = TRUE,
-
                 us_location_reason = %s,
-
-                classification_status =
-
-                    'processing',
-
-                classification_started_at =
-
-                    NOW()
-
-
-
+                classification_status = 'processing',
+                classification_started_at = NOW()
             WHERE id = %s
-
               AND content_hash = %s
-
             """,
-
             (
-
                 decision.reason,
-
                 item["id"],
-
                 item["queue_hash"],
-
             ),
-
         )
-
-
 
     conn.commit()
 
 
+    # --------------------------------------------------------
+    # DETERMINISTIC ATS FACTS
+    # --------------------------------------------------------
+
+    structured_context = (
+        extract_deterministic_fields(
+            item
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # MINIMAL AI PAYLOAD
+    # --------------------------------------------------------
 
     payload = build_classifier_payload(
-
         item
-
     )
 
-
-
-    payload[
-
-        "trusted_structured_context"
-
-    ] = extract_deterministic_fields(
-
-        item
-
-    )
-
+    # IMPORTANT:
+    # Do NOT add trusted_structured_context to the AI payload.
+    #
+    # AI still sees the job description and can extract
+    # multiple locations explicitly stated in the posting.
 
 
     result = classify_job(
@@ -3132,8 +3281,75 @@ def process_item(
         ),
     )
 
+
+    # --------------------------------------------------------
+    # TRUST ATS EMPLOYMENT TYPE
+    # --------------------------------------------------------
+
+    employment_type = (
+        _normalize_employment_type(
+            structured_context.get(
+                "employment_type"
+            )
+        )
+    )
+
+    if employment_type:
+        result.classification.employment_type = (
+            employment_type
+        )
+
+
+    # --------------------------------------------------------
+    # TRUST ATS WORKPLACE TYPE
+    # --------------------------------------------------------
+
+    workplace_type = (
+        _normalize_workplace_type(
+            structured_context.get(
+                "workplace_type"
+            )
+        )
+    )
+
+    if workplace_type:
+        result.classification.workplace_type = (
+            workplace_type
+        )
+
+
+    # --------------------------------------------------------
+    # MERGE AI + ATS LOCATIONS
+    #
+    # AI locations are retained because the posting may name
+    # multiple locations.
+    #
+    # ATS locations are added when AI missed them.
+    # --------------------------------------------------------
+
+    ats_locations = (
+        _ashby_ats_locations(
+            item
+        )
+    )
+
+    result.classification.locations = (
+        _merge_locations(
+            result.classification.locations,
+            ats_locations,
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # CITIZENSHIP SAFETY CHECK
+    # --------------------------------------------------------
+
     description_lower = (
-        item.get("description_text") or ""
+        item.get(
+            "description_text"
+        )
+        or ""
     ).lower()
 
     citizenship_phrases = (
@@ -3148,7 +3364,10 @@ def process_item(
         phrase in description_lower
         for phrase in citizenship_phrases
     ):
-        result.classification.citizenship_requirement = None
+        result.classification.citizenship_requirement = (
+            None
+        )
+
 
     saved = save_success(
         conn,
@@ -3157,14 +3376,18 @@ def process_item(
         result.usage,
     )
 
+
     if not saved:
+        return (
+            "stale",
+            result.usage,
+        )
 
-        return "stale", result.usage
 
-
-
-    return "completed", result.usage
-
+    return (
+        "completed",
+        result.usage,
+    )
 
 
 
@@ -3200,6 +3423,7 @@ def run_enrichment(
     cached_tokens = 0
     total_tokens = 0
 
+    attempted_queue_ids: set[int] = set()
     with get_connection() as conn:
 
         recover_stale_queue(conn)
@@ -3209,10 +3433,18 @@ def run_enrichment(
         # not queue items.
         while ai_calls < limit:
 
-            item = claim_next_queue_item(conn)
+            item = claim_next_queue_item(
+                conn,
+                attempted_queue_ids,
+            )
 
             if item is None:
                 break
+
+            attempted_queue_ids.add(
+                item["queue_id"]
+            )
+
 
             processed += 1
 

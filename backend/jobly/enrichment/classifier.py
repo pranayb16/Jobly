@@ -23,25 +23,21 @@ OPENROUTER_URL = (
     "https://openrouter.ai/api/v1/chat/completions"
 )
 
-# OpenRouter free models are limited to 20 requests/minute.
-# 3.1 seconds keeps us slightly below that limit.
 FREE_REQUEST_INTERVAL_SECONDS = 3.1
 
-
 _last_free_request_at: float | None = None
-_free_unavailable_for_run = False
 
 
 @dataclass(frozen=True)
 class GeminiUsage:
     """
-    Kept under the old name temporarily so worker.py does not
-    need a large refactor.
+    Temporary compatibility name.
 
-    These values now come from OpenRouter.
+    Usage now comes from OpenRouter.
     """
 
     interaction_id: str | None = None
+    model: str | None = None
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -62,11 +58,11 @@ class ClassificationResult:
     usage: GeminiUsage
 
 
-def build_prompt(
+def build_messages(
     payload: dict,
     *,
     schema_version: str,
-) -> str:
+) -> list[dict]:
 
     job_json = json.dumps(
         payload,
@@ -87,11 +83,16 @@ def build_prompt(
             f"{schema_version!r}"
         )
 
-    return (
-        f"{system_prompt}\n\n"
-        f"JOB DATA:\n"
-        f"{job_json}"
-    )
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": job_json,
+        },
+    ]
 
 
 def _wait_for_free_request_slot() -> None:
@@ -100,7 +101,6 @@ def _wait_for_free_request_slot() -> None:
     now = time.monotonic()
 
     if _last_free_request_at is not None:
-
         elapsed = (
             now
             - _last_free_request_at
@@ -122,11 +122,44 @@ def _wait_for_free_request_slot() -> None:
 def _request_openrouter(
     *,
     model: str,
-    prompt: str,
+    messages: list[dict],
     response_schema: dict,
 ) -> requests.Response:
 
     settings = get_settings()
+
+    body = {
+        "model": model,
+
+        "messages": messages,
+
+        "response_format": {
+            "type": "json_schema",
+
+            "json_schema": {
+                "name": "job_enrichment",
+                "strict": True,
+                "schema": response_schema,
+            },
+        },
+
+        "provider": {
+            "require_parameters": True,
+        },
+
+        "usage": {
+            "include": True,
+        },
+
+        "temperature": 0,
+    }
+
+    # GPT-OSS is used only as paid fallback.
+    # Keep reasoning low for extraction work.
+    if model == settings.openrouter_paid_model:
+        body["reasoning"] = {
+            "effort": "none",
+        }
 
     return requests.post(
         OPENROUTER_URL,
@@ -147,41 +180,7 @@ def _request_openrouter(
                 "Jobly",
         },
 
-        json={
-            "model": model,
-
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-
-            "response_format": {
-                "type": "json_schema",
-
-                "json_schema": {
-                    "name":
-                        "job_enrichment",
-
-                    "strict":
-                        True,
-
-                    "schema":
-                        response_schema,
-                },
-            },
-
-            "provider": {
-                "require_parameters": True,
-            },
-
-            "usage": {
-                "include": True,
-            },
-
-            "temperature": 0,
-        },
+        json=body,
 
         timeout=120,
     )
@@ -189,6 +188,8 @@ def _request_openrouter(
 
 def _usage_from_response(
     data: dict,
+    *,
+    fallback_model: str,
 ) -> GeminiUsage:
 
     usage = (
@@ -212,6 +213,11 @@ def _usage_from_response(
 
     return GeminiUsage(
         interaction_id=data.get("id"),
+
+        model=(
+            data.get("model")
+            or fallback_model
+        ),
 
         input_tokens=int(
             usage.get(
@@ -279,111 +285,45 @@ def _extract_error(
         return response.text[:2000]
 
 
-def classify_job(
-    payload: dict,
+def _free_error_allows_paid_fallback(
+    response: requests.Response,
+) -> bool:
+
+    if response.status_code == 429:
+        return True
+
+    if response.status_code >= 500:
+        return True
+
+    message = (
+        _extract_error(response)
+        .lower()
+    )
+
+    fallback_phrases = (
+        "unavailable for free",
+        "paid version is available",
+        "model is unavailable",
+        "no endpoints found",
+        "no endpoints available",
+        "temporarily unavailable",
+        "rate limit",
+        "rate-limit",
+        "rate limited",
+    )
+
+    return any(
+        phrase in message
+        for phrase in fallback_phrases
+    )
+
+
+def _parse_response(
+    response: requests.Response,
     *,
-    schema_version: str | None = None,
+    model_class,
+    fallback_model: str,
 ) -> ClassificationResult:
-
-    global _free_unavailable_for_run
-
-    settings = get_settings()
-
-    requested_version = (
-        schema_version
-        or settings.ai_classification_version
-    )
-
-    if requested_version == "v3":
-
-        response_schema = (
-            JOB_ENRICHMENT_V3_JSON_SCHEMA
-        )
-
-        model_class = JobEnrichmentV3
-
-    elif requested_version == "v2":
-
-        response_schema = (
-            JOB_ENRICHMENT_V2_JSON_SCHEMA
-        )
-
-        model_class = JobEnrichmentV2
-
-    else:
-
-        raise ValueError(
-            "Jobly enrichment supports "
-            "'v2' and 'v3'. "
-            f"Received: {requested_version!r}"
-        )
-
-    prompt = build_prompt(
-        payload,
-        schema_version=requested_version,
-    )
-
-    response = None
-
-    # --------------------------------------------------------
-    # FREE ROUTE FIRST
-    # --------------------------------------------------------
-
-    if not _free_unavailable_for_run:
-
-        _wait_for_free_request_slot()
-
-        response = _request_openrouter(
-            model=(
-                settings
-                .openrouter_free_model
-            ),
-            prompt=prompt,
-            response_schema=response_schema,
-        )
-
-        if response.status_code == 429:
-
-            # Free quota exhausted or free route rate-limited.
-            # Switch to paid for the remainder of this run.
-            _free_unavailable_for_run = True
-
-            response = None
-
-        elif response.status_code >= 500:
-
-            # Free provider unavailable.
-            # Fall back to paid for this request.
-            response = None
-
-        elif not response.ok:
-
-            raise RuntimeError(
-                "OpenRouter free request failed: "
-                + _extract_error(response)
-            )
-
-    # --------------------------------------------------------
-    # PAID FALLBACK
-    # --------------------------------------------------------
-
-    if response is None:
-
-        response = _request_openrouter(
-            model=(
-                settings
-                .openrouter_paid_model
-            ),
-            prompt=prompt,
-            response_schema=response_schema,
-        )
-
-        if not response.ok:
-
-            raise RuntimeError(
-                "OpenRouter paid request failed: "
-                + _extract_error(response)
-            )
 
     data = response.json()
 
@@ -393,7 +333,6 @@ def classify_job(
     )
 
     if not choices:
-
         raise RuntimeError(
             "OpenRouter returned no choices"
         )
@@ -405,7 +344,6 @@ def classify_job(
     )
 
     if not content:
-
         raise RuntimeError(
             "OpenRouter returned "
             "an empty response"
@@ -418,10 +356,139 @@ def classify_job(
     )
 
     usage = _usage_from_response(
-        data
+        data,
+        fallback_model=fallback_model,
     )
 
     return ClassificationResult(
         classification=classification,
         usage=usage,
+    )
+
+
+def classify_job(
+    payload: dict,
+    *,
+    schema_version: str | None = None,
+) -> ClassificationResult:
+
+    settings = get_settings()
+
+    requested_version = (
+        schema_version
+        or settings.ai_classification_version
+    )
+
+    if requested_version == "v3":
+        response_schema = (
+            JOB_ENRICHMENT_V3_JSON_SCHEMA
+        )
+
+        model_class = JobEnrichmentV3
+
+    elif requested_version == "v2":
+        response_schema = (
+            JOB_ENRICHMENT_V2_JSON_SCHEMA
+        )
+
+        model_class = JobEnrichmentV2
+
+    else:
+        raise ValueError(
+            "Jobly enrichment supports "
+            "'v2' and 'v3'. "
+            f"Received: {requested_version!r}"
+        )
+
+    messages = build_messages(
+        payload,
+        schema_version=requested_version,
+    )
+
+    # ========================================================
+    # FREE FIRST — FOR EVERY JOB
+    # ========================================================
+
+    _wait_for_free_request_slot()
+
+    free_response: requests.Response | None = None
+
+    try:
+        free_response = _request_openrouter(
+        model=settings.openrouter_free_model,
+        messages=messages,
+        response_schema=response_schema,
+    )
+
+    except requests.RequestException:
+        # Network/provider failure.
+        # Paid fallback for this job only.
+        free_response = None
+
+    if free_response is not None:
+
+        if free_response.ok:
+
+            try:
+                return _parse_response(
+                    free_response,
+                    model_class=model_class,
+                    fallback_model=(
+                        settings.openrouter_free_model
+                    ),
+                )
+
+            except Exception:
+                # Free response was unusable or failed
+                # schema/semantic validation.
+                #
+                # Try paid for this job.
+                pass
+
+        else:
+
+            if not _free_error_allows_paid_fallback(
+                free_response
+            ):
+
+                raise RuntimeError(
+                    "OpenRouter free request failed: "
+                    + _extract_error(
+                        free_response
+                    )
+                )
+
+    # ========================================================
+    # PAID FALLBACK — THIS JOB ONLY
+    # ========================================================
+
+    try:
+        paid_response = _request_openrouter(
+        model=settings.openrouter_paid_model,
+        messages=messages,
+        response_schema=response_schema,
+    )
+
+    except requests.RequestException as exc:
+
+        raise RuntimeError(
+            "OpenRouter paid request failed: "
+            f"{exc}"
+        ) from exc
+
+    if not paid_response.ok:
+
+        raise RuntimeError(
+            "OpenRouter paid request failed: "
+            + _extract_error(
+                paid_response
+            )
+        )
+
+    return _parse_response(
+        paid_response,
+        model_class=model_class,
+        fallback_model=(
+            settings.openrouter_paid_model
+        ),
     )

@@ -37,6 +37,72 @@ CertificationRequirement = Literal[
     "preferred",
 ]
 
+class SkillEntry(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid"
+    )
+
+    name: str
+
+    requirement: SkillRequirement
+
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(
+        cls,
+        value: str,
+    ) -> str:
+
+        cleaned = " ".join(
+            value.strip().split()
+        )
+
+        if not cleaned:
+            raise ValueError(
+                "Skill name cannot be empty"
+            )
+
+        if cleaned.lower() in {
+            "required",
+            "preferred",
+            "mentioned",
+        }:
+            raise ValueError(
+                "Skill name must be an actual skill"
+            )
+
+        return cleaned
+
+
+class CertificationEntry(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid"
+    )
+
+    name: str
+
+    requirement: CertificationRequirement
+
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(
+        cls,
+        value: str,
+    ) -> str:
+
+        cleaned = " ".join(
+            value.strip().split()
+        )
+
+        if not cleaned:
+            raise ValueError(
+                "Certification name cannot be empty"
+            )
+
+        return cleaned
+
 
 EducationLevel = Literal[
     "none",
@@ -160,10 +226,11 @@ class JobEnrichmentV3(BaseModel):
     # SKILLS
     # ========================================================
 
-    skills: dict[
-        str,
-        SkillRequirement,
-    ]
+    skills: list[
+        SkillEntry
+    ] = Field(
+        default_factory=list
+    )
     # Example:
     # {
     #     "Python": "required",
@@ -213,11 +280,10 @@ class JobEnrichmentV3(BaseModel):
     # Example:
     # ["Computer Science", "Engineering"]
 
-    certifications: dict[
-        str,
-        CertificationRequirement,
+    certifications: list[
+        CertificationEntry
     ] = Field(
-        default_factory=dict
+        default_factory=list
     )
     # Example:
     # {
@@ -383,28 +449,6 @@ class JobEnrichmentV3(BaseModel):
                 result.append(
                     cleaned
                 )
-
-        return result
-
-
-    @field_validator(
-        "skills",
-        "certifications",
-    )
-    @classmethod
-    def clean_mappings(
-        cls,
-        values: dict,
-    ) -> dict:
-        result = {}
-
-        for name, requirement in values.items():
-            cleaned = " ".join(
-                name.strip().split()
-            )
-
-            if cleaned:
-                result[cleaned] = requirement
 
         return result
 
