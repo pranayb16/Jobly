@@ -40,7 +40,10 @@ class Settings:
     gemini_api_key: str | None
     ai_model: str
     ai_classification_version: str
+    ai_prompt_version: str
     ai_max_attempts: int
+    ai_enrichment_limit: int
+    source_target_count: int
     crawl_source_limit: int | None
     app_env: str
     log_level: str
@@ -67,12 +70,14 @@ def get_settings() -> Settings:
         frontend_origin=os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").strip(),
         gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
         ai_model=os.getenv("AI_MODEL", "gemini-3.5-flash-lite").strip(),
-        ai_classification_version=os.getenv("AI_CLASSIFICATION_VERSION", "v1").strip(),
+        ai_classification_version=os.getenv("AI_CLASSIFICATION_VERSION", "v2").strip(),
+        ai_prompt_version=os.getenv("AI_PROMPT_VERSION", "v2").strip(),
         ai_max_attempts=_positive_int("AI_MAX_ATTEMPTS", 5),
+        ai_enrichment_limit=_positive_int("AI_ENRICHMENT_LIMIT", 5000),
+        source_target_count=_positive_int("SOURCE_TARGET_COUNT", 1000),
         crawl_source_limit=_optional_int("CRAWL_SOURCE_LIMIT"),
         app_env=os.getenv("APP_ENV", "development").strip(),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         mass_drop_min_previous_jobs=_positive_int("CRAWL_MASS_DROP_MIN_PREVIOUS_JOBS", 20),
         mass_drop_ratio=_ratio("CRAWL_MASS_DROP_RATIO", 0.25),
     )
-

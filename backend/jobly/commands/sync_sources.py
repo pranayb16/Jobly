@@ -27,7 +27,7 @@ def main() -> None:
         "--target",
         type=int,
         default=(
-            settings.crawl_source_limit
+            settings.source_target_count
         ),
     )
 
@@ -39,7 +39,7 @@ def main() -> None:
         parser.error(
             (
                 "No source target configured. "
-                "Set CRAWL_SOURCE_LIMIT or "
+                "Set SOURCE_TARGET_COUNT or "
                 "pass --target."
             )
         )

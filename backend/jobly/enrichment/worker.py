@@ -1,862 +1,343 @@
+from __future__ import annotations
+
 import argparse
 import logging
+from dataclasses import dataclass
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from jobly.config import get_settings
-from jobly.db.connection import (
-    get_connection,
-)
-
-from jobly.enrichment.classifier import (
-    classify_job,
-)
-
-from jobly.enrichment.input_builder import (
-    build_classifier_payload,
-)
-
-from jobly.market.us_scope import (
-    classify_us_job,
-)
+from jobly.db.connection import get_connection
+from jobly.enrichment.classifier import classify_job
+from jobly.enrichment.deterministic import extract_deterministic_fields
+from jobly.enrichment.input_builder import build_classifier_payload
+from jobly.enrichment.schemas_v2 import JobEnrichmentV2
+from jobly.market.us_scope import classify_us_job
 
 
-def _max_attempts() -> int:
-    return get_settings().ai_max_attempts
+logger = logging.getLogger(__name__)
 
 
-def recover_stale_jobs(
-    conn,
-):
+@dataclass(frozen=True)
+class EnrichmentSummary:
+    processed: int
+    completed: int
+    failed: int
+    stale: int
+    skipped_non_us: int
+    backlog: int
 
+
+def recover_stale_queue(conn) -> None:
+    settings = get_settings()
     with conn.cursor() as cur:
-
         cur.execute(
             """
-            UPDATE jobs
-
-            SET
-                classification_status =
-                    CASE
-
-                        WHEN
-                            classification_attempts >= %s
-
-                        THEN 'failed'
-
-                        ELSE 'pending'
-
-                    END,
-
-                classification_started_at =
-                    NULL,
-
-                classification_error =
-                    COALESCE(
-                        classification_error,
-                        'worker_timeout'
-                    )
-
-            WHERE
-                classification_status =
-                    'processing'
-
-                AND classification_started_at
-                    IS NOT NULL
-
-                AND classification_started_at <
-                    NOW()
-                    - INTERVAL '15 minutes'
+            UPDATE enrichment_queue
+            SET status = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END,
+                started_at = NULL,
+                last_error = COALESCE(last_error, 'worker_timeout')
+            WHERE status = 'processing'
+              AND started_at < NOW() - INTERVAL '15 minutes'
             """,
-            (
-                _max_attempts(),
-            ),
+            (settings.ai_max_attempts,),
         )
-
-
     conn.commit()
 
 
-def count_pending_fresh_jobs(
-    conn,
-):
-
+def count_backlog(conn) -> int:
     with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM enrichment_queue WHERE status = 'pending'")
+        return cur.fetchone()[0]
 
+
+def claim_next_queue_item(conn) -> dict | None:
+    settings = get_settings()
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT COUNT(*)
-
-            FROM jobs
-
-            WHERE
-                active = TRUE
-
-                AND posted_at IS NOT NULL
-
-                AND posted_at >=
-                    NOW()
-                    - INTERVAL '48 hours'
-
-                AND content_hash
-                    IS NOT NULL
-
-                AND classification_status =
-                    'pending'
-
-                AND classification_attempts
-                    < %s
-            """,
-            (
-                _max_attempts(),
-            ),
-        )
-
-
-        return (
-            cur.fetchone()[0]
-        )
-
-
-def claim_next_job(
-    conn,
-):
-
-    with conn.cursor(
-        row_factory=dict_row
-    ) as cur:
-
-        cur.execute(
-            """
-            SELECT
-                id,
-
-                provider,
-                company,
-                title,
-                location,
-
-                employment_type,
-                workplace_type,
-
-                posted_at,
-                posted_at_source,
-
-                description_text,
-                raw_payload,
-
-                content_hash,
-
-                classification_attempts
-
-            FROM jobs
-
-            WHERE
-                active = TRUE
-
-                AND posted_at
-                    IS NOT NULL
-
-                AND posted_at >=
-                    NOW()
-                    - INTERVAL '48 hours'
-
-                AND content_hash
-                    IS NOT NULL
-
-                AND classification_status =
-                    'pending'
-
-                AND classification_attempts
-                    < %s
-
-            ORDER BY
-                posted_at DESC,
-                id DESC
-
-            FOR UPDATE
-            SKIP LOCKED
-
+            SELECT id, job_id, content_hash, priority, reason, attempts
+            FROM enrichment_queue
+            WHERE status = 'pending' AND attempts < %s
+            ORDER BY priority ASC, created_at ASC, id ASC
+            FOR UPDATE SKIP LOCKED
             LIMIT 1
             """,
-            (
-                _max_attempts(),
-            ),
+            (settings.ai_max_attempts,),
         )
-
-
-        job = (
-            cur.fetchone()
-        )
-
-
-        if job is None:
-
+        queue_item = cur.fetchone()
+        if queue_item is None:
             conn.commit()
-
             return None
 
-
         cur.execute(
             """
-            UPDATE jobs
+            UPDATE enrichment_queue
+            SET status = 'processing', started_at = NOW(), attempts = attempts + 1,
+                last_error = NULL
+            WHERE id = %s
+            RETURNING attempts
+            """,
+            (queue_item["id"],),
+        )
+        queue_item["attempts"] = cur.fetchone()["attempts"]
+        cur.execute(
+            """
+            SELECT id, external_job_id, provider, company, title, location,
+                   employment_type, workplace_type, posted_at, posted_at_source,
+                   description_text, raw_payload, content_hash
+            FROM jobs WHERE id = %s
+            """,
+            (queue_item["job_id"],),
+        )
+        job = cur.fetchone()
+    conn.commit()
+    if job is None:
+        return None
+    return {**job, "queue_id": queue_item["id"], "queue_hash": queue_item["content_hash"],
+            "queue_attempts": queue_item["attempts"], "queue_reason": queue_item["reason"]}
 
-            SET
-                classification_status =
-                    'processing',
 
-                classification_started_at =
-                    NOW(),
-
-                classification_error =
-                    NULL
-
+def _complete_queue(conn, queue_id: int, note: str | None = None) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE enrichment_queue
+            SET status = 'completed', completed_at = NOW(), started_at = NULL, last_error = %s
             WHERE id = %s
             """,
-            (
-                job["id"],
-            ),
+            (note, queue_id),
         )
-
-
     conn.commit()
 
 
-    return job
-
-
-def save_market_decision(
-    conn,
-    job: dict,
-    eligible: bool,
-    reason: str,
-):
-
+def _mark_non_us(conn, item: dict, reason: str) -> None:
     with conn.cursor() as cur:
-
         cur.execute(
             """
             UPDATE jobs
-
-            SET
-                is_us_job = %s,
-
-                us_location_reason =
-                    %s
-
-            WHERE
-                id = %s
-
-                AND content_hash = %s
+            SET is_us_job = FALSE, us_location_reason = %s,
+                classification_status = 'skipped_non_us',
+                classification_started_at = NULL, classification_error = NULL
+            WHERE id = %s AND content_hash = %s
             """,
-            (
-                eligible,
-                reason,
-
-                job["id"],
-                job["content_hash"],
-            ),
+            (reason, item["id"], item["queue_hash"]),
         )
-
-
-    conn.commit()
-
-
-def skip_non_us_job(
-    conn,
-    job: dict,
-    reason: str,
-):
-
-    with conn.cursor() as cur:
-
         cur.execute(
             """
-            UPDATE jobs
-
-            SET
-                is_us_job = FALSE,
-
-                us_location_reason =
-                    %s,
-
-                classification_status =
-                    'skipped_non_us',
-
-                classification_started_at =
-                    NULL,
-
-                classification_error =
-                    NULL
-
-            WHERE
-                id = %s
-
-                AND content_hash =
-                    %s
-            """,
-            (
-                reason,
-
-                job["id"],
-
-                job["content_hash"],
-            ),
-        )
-
-
-    conn.commit()
-
-
-def increment_ai_attempt(
-    conn,
-    job_id: int,
-):
-
-    with conn.cursor() as cur:
-
-        cur.execute(
-            """
-            UPDATE jobs
-
-            SET
-                classification_attempts =
-                    classification_attempts + 1
-
+            UPDATE enrichment_queue
+            SET status = 'completed', completed_at = NOW(), started_at = NULL
             WHERE id = %s
             """,
-            (
-                job_id,
-            ),
+            (item["queue_id"],),
         )
-
-
     conn.commit()
 
 
-def reset_changed_job(
-    conn,
-    job_id: int,
-):
+def _legacy_projection(classification) -> dict:
+    if isinstance(classification, JobEnrichmentV2):
+        skills = list(dict.fromkeys(classification.required_skills + classification.preferred_skills))
+        locations = [
+            {
+                "city": location.city,
+                "state": location.region,
+                "state_code": None,
+                "country": location.country,
+                "country_code": location.country_code,
+                "remote": classification.workplace_type == "remote",
+            }
+            for location in classification.locations
+        ]
+        return {
+            "job_family": classification.job_family,
+            "job_subfamily": classification.job_subfamily,
+            "related_roles": classification.related_roles,
+            "skills": skills,
+            "seniority": classification.seniority,
+            "years_min": classification.years_experience_min,
+            "years_max": classification.years_experience_max,
+            "locations": locations,
+            "confidence": classification.confidence,
+        }
+    return {
+        "job_family": classification.job_family,
+        "job_subfamily": classification.job_subfamily,
+        "related_roles": classification.related_roles,
+        "skills": classification.skills,
+        "seniority": classification.seniority,
+        "years_min": classification.years_experience_min,
+        "years_max": classification.years_experience_max,
+        "locations": [location.model_dump() for location in classification.additional_locations],
+        "confidence": classification.confidence,
+    }
 
+
+def save_success(conn, item: dict, classification) -> bool:
+    settings = get_settings()
     with conn.cursor() as cur:
+        cur.execute("SELECT content_hash FROM jobs WHERE id = %s FOR UPDATE", (item["id"],))
+        current = cur.fetchone()
+        if current is None or current[0] != item["queue_hash"]:
+            cur.execute(
+                """
+                UPDATE enrichment_queue
+                SET status = 'completed', completed_at = NOW(), started_at = NULL,
+                    last_error = 'stale_content_hash'
+                WHERE id = %s
+                """,
+                (item["queue_id"],),
+            )
+            conn.commit()
+            return False
 
+        data = classification.model_dump(mode="json")
+        projection = _legacy_projection(classification)
+        cur.execute(
+            """
+            INSERT INTO job_enrichments (
+                job_id, content_hash, schema_version, model, prompt_version, data, confidence
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (job_id, content_hash, schema_version) DO UPDATE
+            SET model = EXCLUDED.model, prompt_version = EXCLUDED.prompt_version,
+                data = EXCLUDED.data, confidence = EXCLUDED.confidence, created_at = NOW()
+            """,
+            (
+                item["id"],
+                item["queue_hash"],
+                settings.ai_classification_version,
+                settings.ai_model,
+                settings.ai_prompt_version,
+                Jsonb(data),
+                projection["confidence"],
+            ),
+        )
         cur.execute(
             """
             UPDATE jobs
-
-            SET
-                classification_status =
-                    'pending',
-
-                classification_started_at =
-                    NULL,
-
-                classification_error =
-                    'job_changed_during_classification'
-
+            SET job_family = %s, job_subfamily = %s, related_roles = %s, skills = %s,
+                seniority = %s, years_experience_min = %s, years_experience_max = %s,
+                ai_locations = %s, classification_confidence = %s,
+                classification_status = 'ready', classification_version = %s,
+                classified_at = NOW(), classified_content_hash = content_hash,
+                classification_started_at = NULL, classification_error = NULL, is_us_job = TRUE
+            WHERE id = %s AND content_hash = %s
+            """,
+            (
+                projection["job_family"], projection["job_subfamily"],
+                Jsonb(projection["related_roles"]), Jsonb(projection["skills"]),
+                projection["seniority"], projection["years_min"], projection["years_max"],
+                Jsonb(projection["locations"]), projection["confidence"],
+                settings.ai_classification_version, item["id"], item["queue_hash"],
+            ),
+        )
+        cur.execute(
+            """
+            UPDATE enrichment_queue
+            SET status = 'completed', completed_at = NOW(), started_at = NULL, last_error = NULL
             WHERE id = %s
             """,
-            (
-                job_id,
-            ),
+            (item["queue_id"],),
         )
-
-
     conn.commit()
-
-
-def save_success(
-    conn,
-    job: dict,
-    classification,
-):
-
-    locations = [
-        location.model_dump()
-
-        for location
-        in classification.additional_locations
-    ]
-
-
-    with conn.cursor() as cur:
-
-        cur.execute(
-            """
-            UPDATE jobs
-
-            SET
-                job_family = %s,
-
-                job_subfamily = %s,
-
-                related_roles = %s,
-
-                skills = %s,
-
-                seniority = %s,
-
-                years_experience_min =
-                    %s,
-
-                years_experience_max =
-                    %s,
-
-                ai_locations = %s,
-
-                classification_confidence =
-                    %s,
-
-                classification_status =
-                    'ready',
-
-                classification_version =
-                    %s,
-
-                classified_at =
-                    NOW(),
-
-                classified_content_hash =
-                    content_hash,
-
-                classification_started_at =
-                    NULL,
-
-                classification_error =
-                    NULL,
-
-                is_us_job = TRUE
-
-            WHERE
-                id = %s
-
-                AND content_hash = %s
-            """,
-            (
-                classification.job_family,
-
-                classification.job_subfamily,
-
-                Jsonb(
-                    classification.related_roles
-                ),
-
-                Jsonb(
-                    classification.skills
-                ),
-
-                classification.seniority,
-
-                classification.years_experience_min,
-
-                classification.years_experience_max,
-
-                Jsonb(
-                    locations
-                ),
-
-                classification.confidence,
-
-                get_settings().ai_classification_version,
-
-                job["id"],
-
-                job["content_hash"],
-            ),
-        )
-
-
-        updated_rows = (
-            cur.rowcount
-        )
-
-
-    conn.commit()
-
-
-    if updated_rows == 0:
-
-        logging.warning(
-            "STALE RESULT | job=%s",
-            job["id"],
-        )
-
-
-        reset_changed_job(
-            conn,
-            job["id"],
-        )
-
-
-        return False
-
-
     return True
 
 
-def save_failure(
-    conn,
-    job: dict,
-    error: Exception,
-):
-
-    error_message = (
-        str(error)[:2000]
-    )
-
-
+def save_failure(conn, item: dict, error: Exception) -> bool:
+    settings = get_settings()
+    terminal = item["queue_attempts"] >= settings.ai_max_attempts
+    error_message = str(error)[:2000]
     with conn.cursor() as cur:
-
+        cur.execute(
+            """
+            UPDATE enrichment_queue
+            SET status = %s, started_at = NULL, last_error = %s,
+                completed_at = CASE WHEN %s THEN NOW() ELSE NULL END
+            WHERE id = %s
+            """,
+            ("failed" if terminal else "pending", error_message, terminal, item["queue_id"]),
+        )
         cur.execute(
             """
             UPDATE jobs
-
-            SET
-                classification_status =
-                    CASE
-
-                        WHEN
-                            classification_attempts
-                            >= %s
-
-                        THEN 'failed'
-
-                        ELSE 'pending'
-
-                    END,
-
-                classification_started_at =
-                    NULL,
-
-                classification_error =
-                    %s
-
-            WHERE
-                id = %s
-
-                AND content_hash =
-                    %s
+            SET classification_status = %s, classification_started_at = NULL,
+                classification_attempts = classification_attempts + 1,
+                classification_error = %s
+            WHERE id = %s AND content_hash = %s
             """,
-            (
-                _max_attempts(),
-
-                error_message,
-
-                job["id"],
-
-                job["content_hash"],
-            ),
+            ("failed" if terminal else "pending", error_message, item["id"], item["queue_hash"]),
         )
-
-
     conn.commit()
+    return terminal
 
 
-def process_job(
-    conn,
-    job: dict,
-):
-
-    # ========================================================
-    # U.S. market gate
-    # ========================================================
-
-    decision = (
-        classify_us_job(
-            provider=(
-                job["provider"]
-            ),
-
-            location=(
-                job["location"]
-            ),
-
-            raw=(
-                job["raw_payload"]
-            ),
-        )
-    )
-
-
-    save_market_decision(
-        conn,
-        job,
-        decision.eligible,
-        decision.reason,
-    )
-
-
-    if not decision.eligible:
-
-        logging.info(
-            (
-                "SKIP NON-US | "
-                "id=%s | "
-                "location=%s | "
-                "reason=%s"
-            ),
-
-            job["id"],
-            job["location"],
-            decision.reason,
-        )
-
-
-        skip_non_us_job(
-            conn,
-            job,
-            decision.reason,
-        )
-
-
-        return "skipped_non_us"
-
-
-    # ========================================================
-    # U.S. job — now AI processing can start
-    # ========================================================
-
-    increment_ai_attempt(
-        conn,
-        job["id"],
-    )
-
-
-    payload = (
-        build_classifier_payload(
-            job
-        )
-    )
-
-
-    logging.info(
-        (
-            "CLASSIFY US | "
-            "id=%s | "
-            "provider=%s | "
-            "posted_at=%s | "
-            "location=%s | "
-            "title=%s"
-        ),
-
-        job["id"],
-        job["provider"],
-        job["posted_at"],
-        job["location"],
-        job["title"],
-    )
-
-
-    classification = (
-        classify_job(
-            payload
-        )
-    )
-
-
-    saved = (
-        save_success(
-            conn,
-            job,
-            classification,
-        )
-    )
-
-
-    if not saved:
+def process_item(conn, item: dict) -> str:
+    if item["content_hash"] != item["queue_hash"]:
+        _complete_queue(conn, item["queue_id"], "stale_content_hash")
         return "stale"
 
-
-    logging.info(
-        (
-            "READY US | "
-            "id=%s | "
-            "family=%s | "
-            "seniority=%s | "
-            "confidence=%.2f"
-        ),
-
-        job["id"],
-
-        classification.job_family,
-
-        classification.seniority,
-
-        classification.confidence,
+    decision = classify_us_job(
+        provider=item["provider"], location=item["location"], raw=item["raw_payload"]
     )
+    if not decision.eligible:
+        _mark_non_us(conn, item, decision.reason)
+        return "skipped_non_us"
 
-
-    return "ready"
-
-
-def main():
-
-    parser = (
-        argparse.ArgumentParser()
-    )
-
-
-    parser.add_argument(
-        "--limit",
-
-        type=int,
-
-        default=10,
-
-        help=(
-            "Maximum number of U.S. "
-            "jobs sent to AI"
-        ),
-    )
-
-
-    args = (
-        parser.parse_args()
-    )
-
-
-    if args.limit < 1:
-
-        raise ValueError(
-            "--limit must be at least 1"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE jobs SET is_us_job = TRUE, us_location_reason = %s,
+                classification_status = 'processing', classification_started_at = NOW()
+            WHERE id = %s AND content_hash = %s
+            """,
+            (decision.reason, item["id"], item["queue_hash"]),
         )
+    conn.commit()
+
+    payload = build_classifier_payload(item)
+    payload["trusted_structured_context"] = extract_deterministic_fields(item)
+    classification = classify_job(
+        payload, schema_version=get_settings().ai_classification_version
+    )
+    return "completed" if save_success(conn, item, classification) else "stale"
 
 
-    ai_processed = 0
+def run_enrichment(limit: int | None = None) -> EnrichmentSummary:
+    limit = limit or get_settings().ai_enrichment_limit
+    if limit < 1:
+        raise ValueError("enrichment limit must be at least 1")
 
-    successful = 0
-
-    failed = 0
-
-    skipped_non_us = 0
-
-
+    processed = completed = failed = stale = skipped_non_us = 0
     with get_connection() as conn:
-
-        recover_stale_jobs(
-            conn
-        )
-
-
-        pending = (
-            count_pending_fresh_jobs(
-                conn
-            )
-        )
-
-
-        print(
-            "Fresh pending candidates:",
-            pending,
-        )
-
-
-        while (
-            ai_processed
-            < args.limit
-        ):
-
-            job = (
-                claim_next_job(
-                    conn
-                )
-            )
-
-
-            if job is None:
+        recover_stale_queue(conn)
+        while processed < limit:
+            item = claim_next_queue_item(conn)
+            if item is None:
                 break
-
-
+            processed += 1
             try:
-
-                result = (
-                    process_job(
-                        conn,
-                        job,
-                    )
-                )
-
-
-                if (
-                    result ==
-                    "skipped_non_us"
-                ):
-
-                    skipped_non_us += 1
-
-                    continue
-
-
-                if result == "ready":
-
-                    ai_processed += 1
-
-                    successful += 1
-
-
-                elif result == "stale":
-
-                    ai_processed += 1
-
-
+                result = process_item(conn, item)
+                completed += int(result in {"completed", "skipped_non_us"})
+                stale += int(result == "stale")
+                skipped_non_us += int(result == "skipped_non_us")
             except Exception as exc:
-
-                ai_processed += 1
-
+                logger.exception("enrichment_failed queue_id=%s job_id=%s", item["queue_id"], item["id"])
+                save_failure(conn, item, exc)
                 failed += 1
+        backlog = count_backlog(conn)
+
+    return EnrichmentSummary(processed, completed, failed, stale, skipped_non_us, backlog)
 
 
-                logging.exception(
-                    "FAILED | id=%s",
-                    job["id"],
-                )
-
-
-                save_failure(
-                    conn,
-                    job,
-                    exc,
-                )
-
-
-    logging.info(
-        (
-            "WORKER COMPLETE | "
-            "ai_processed=%s | "
-            "successful=%s | "
-            "failed=%s | "
-            "skipped_non_us=%s"
-        ),
-
-        ai_processed,
-        successful,
-        failed,
-        skipped_non_us,
-    )
-
-
-    print()
-
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Process the priority enrichment queue.")
+    parser.add_argument("--limit", type=int, default=get_settings().ai_enrichment_limit)
+    args = parser.parse_args()
+    summary = run_enrichment(args.limit)
     print(
-        "AI processed:",
-        ai_processed,
-    )
-
-    print(
-        "Successful:",
-        successful,
-    )
-
-    print(
-        "Failed:",
-        failed,
-    )
-
-    print(
-        "Skipped non-US:",
-        skipped_non_us,
+        "Enrichment complete | "
+        f"processed={summary.processed} | completed={summary.completed} | "
+        f"failed={summary.failed} | stale={summary.stale} | backlog={summary.backlog}"
     )
 
 

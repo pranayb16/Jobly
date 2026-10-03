@@ -29,15 +29,24 @@ class CrawlSummary:
     failed_sources: int
     anomaly_sources: int
     job_count: int
+    jobs_new: int = 0
+    jobs_changed: int = 0
+    jobs_removed: int = 0
 
 
-def run_crawl(source_limit: int | None = None) -> CrawlSummary:
+def run_crawl(
+    source_limit: int | None = None,
+    pipeline_run_id: int | None = None,
+) -> CrawlSummary:
     settings = get_settings()
     effective_limit = settings.crawl_source_limit if source_limit is None else source_limit
     successful_sources = 0
     failed_sources = 0
     anomaly_sources = 0
     total_jobs = 0
+    jobs_new = 0
+    jobs_changed = 0
+    jobs_removed = 0
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -49,7 +58,9 @@ def run_crawl(source_limit: int | None = None) -> CrawlSummary:
             crawl_run_id = None
             logger.info("source_start source_id=%s provider=%s", source.id, source.provider)
             try:
-                crawl_run_id, crawl_started_at = create_crawl_run(conn, source.id)
+                crawl_run_id, crawl_started_at = create_crawl_run(
+                    conn, source.id, pipeline_run_id
+                )
                 jobs = crawl_source(source.provider, source.canonical_url)
                 decision = evaluate_mass_drop(
                     source.last_job_count,
@@ -60,17 +71,23 @@ def run_crawl(source_limit: int | None = None) -> CrawlSummary:
 
                 with conn.cursor() as cur:
                     for job in jobs:
-                        save_job(
+                        result = save_job(
                             cur,
                             source.id,
                             crawl_run_id,
                             source.last_success_at,
                             crawl_started_at,
                             job,
+                            pipeline_run_id,
                         )
+                        jobs_new += int(result.created)
+                        jobs_changed += int(result.changed)
 
                     if decision.allowed:
-                        deactivated = mark_missing_jobs_inactive(cur, source.id, crawl_run_id)
+                        deactivated = mark_missing_jobs_inactive(
+                            cur, source.id, crawl_run_id, pipeline_run_id
+                        )
+                        jobs_removed += deactivated
                     else:
                         deactivated = 0
                         anomaly_sources += 1
@@ -90,6 +107,7 @@ def run_crawl(source_limit: int | None = None) -> CrawlSummary:
                         crawl_run_id,
                         len(jobs),
                         warning=decision.reason,
+                        update_trusted_count=decision.allowed,
                     )
                 conn.commit()
 
@@ -130,6 +148,9 @@ def run_crawl(source_limit: int | None = None) -> CrawlSummary:
         failed_sources=failed_sources,
         anomaly_sources=anomaly_sources,
         job_count=total_jobs,
+        jobs_new=jobs_new,
+        jobs_changed=jobs_changed,
+        jobs_removed=jobs_removed,
     )
     logger.info(
         "crawl_complete source_count=%s successful=%s failed=%s anomalies=%s job_count=%s",

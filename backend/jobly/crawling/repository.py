@@ -36,15 +36,17 @@ def select_active_sources(cur, limit: int | None) -> list[CrawlSource]:
     return [CrawlSource(*row) for row in cur.fetchall()]
 
 
-def create_crawl_run(conn, source_id: int) -> tuple[int, object]:
+def create_crawl_run(
+    conn, source_id: int, pipeline_run_id: int | None = None
+) -> tuple[int, object]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO crawl_runs (source_id, status)
-            VALUES (%s, 'running')
+            INSERT INTO crawl_runs (source_id, status, pipeline_run_id)
+            VALUES (%s, 'running', %s)
             RETURNING id, started_at
             """,
-            (source_id,),
+            (source_id, pipeline_run_id),
         )
         row = cur.fetchone()
     conn.commit()
@@ -58,15 +60,17 @@ def mark_crawl_success(
     job_count: int,
     *,
     warning: str | None = None,
+    update_trusted_count: bool = True,
 ) -> None:
     cur.execute(
         """
         UPDATE sources
         SET last_attempt_at = NOW(), last_crawled_at = NOW(), last_success_at = NOW(),
-            last_job_count = %s, consecutive_failures = 0, last_error = NULL
+            last_job_count = CASE WHEN %s THEN %s ELSE last_job_count END,
+            consecutive_failures = 0, last_error = NULL
         WHERE id = %s
         """,
-        (job_count, source_id),
+        (update_trusted_count, job_count, source_id),
     )
     cur.execute(
         """

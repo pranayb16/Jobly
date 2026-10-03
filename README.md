@@ -1,37 +1,46 @@
 # Jobly
 
-Jobly collects public job postings from Greenhouse, Ashby, and Lever, normalizes them,
-keeps source and crawl history in PostgreSQL, conservatively identifies U.S. roles,
-enriches fresh eligible jobs with Gemini, and publishes ready jobs through FastAPI to a
-Next.js frontend. The public product remains a rolling 48-hour job index.
+Jobly is a hiring-intelligence platform. Once per day it crawls employer career sites,
+stores the current job state, preserves prior versions and lifecycle events, processes a
+bounded AI enrichment queue, and creates deterministic company snapshots. The original
+48-hour job-search product remains available under `/jobs` and `/api/jobs`.
 
 ## Architecture
 
 ```text
-ATS APIs -> crawl command -> PostgreSQL/Cloud SQL -> enrich command -> public_jobs
-                                                                  -> FastAPI
-                                                                  -> Next.js
+Cloud Scheduler (once/day)
+  -> pipeline_run
+  -> migrate
+  -> source_candidates -> validated sources
+  -> crawl ATS sites
+       -> jobs (current state)
+       -> job_versions + job_events (history)
+       -> enrichment_queue (new/changed first)
+  -> bounded Gemini v2 enrichment -> job_enrichments.data
+  -> company_daily_snapshots
+  -> deterministic intelligence API -> Next.js intelligence routes
 ```
 
-The crawler and enrichment worker each run once and exit. `pipeline` runs them in order.
-Cloud Scheduler, rather than application sleeps, owns the production schedule.
+The crawler never calls Gemini. A remaining enrichment backlog is recorded but does not
+fail ingestion or snapshot generation.
 
 ## Repository layout
 
 ```text
-backend/       installable jobly package, API, workers, commands, tests, Dockerfile
-frontend/      existing Next.js application and server-side FastAPI proxy
-migrations/    ordered PostgreSQL migrations and publication views
-scripts/       development and one-off maintenance utilities
-data/          source-discovery datasets (not included in the Python package)
-infra/gcp/     deployment architecture and command outline
-.github/       backend and frontend verification workflows
+backend/jobly/companies/      canonical company identity and conservative linking
+backend/jobly/products/jobs/ optional legacy job-board API
+backend/jobly/enrichment/     deterministic extraction, v1/v2 schemas, queue worker
+backend/jobly/intelligence/   daily snapshots and deterministic trend queries
+backend/jobly/pipeline/       pipeline-run persistence
+frontend/app/                 intelligence routes plus the existing /jobs experience
+migrations/                   ordered PostgreSQL schema migrations
+data/                         CSV import sources; not a production runtime dependency
+infra/gcp/                    Cloud Run and once-daily Scheduler instructions
 ```
 
 ## Local setup
 
-Python 3.11+ and Node.js 22 are supported. PostgreSQL is required for migrations and all
-runtime commands except `--help` and deterministic unit tests.
+Python 3.11+, Node.js 22, and PostgreSQL are required.
 
 ```bash
 cp .env.example .env
@@ -39,12 +48,8 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
-```
 
-Install the frontend separately:
-
-```bash
-cd frontend
+cd ../frontend
 npm ci
 cp .env.local.example .env.local
 ```
@@ -53,64 +58,95 @@ cp .env.local.example .env.local
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string; required when database work begins | none |
-| `FRONTEND_ORIGIN` | Allowed browser origin for FastAPI CORS | `http://localhost:3000` |
-| `GEMINI_API_KEY` | Gemini credential; required only by enrichment | none |
-| `AI_MODEL` | Gemini model | `gemini-3.5-flash-lite` |
-| `AI_CLASSIFICATION_VERSION` | Stored classifier version | `v1` |
-| `AI_MAX_ATTEMPTS` | Maximum AI attempts before failure | `5` |
-| `CRAWL_SOURCE_LIMIT` | Maximum active sources per run; blank means all | blank |
+| `DATABASE_URL` | PostgreSQL connection string | none |
+| `FRONTEND_ORIGIN` | Allowed browser origin | `http://localhost:3000` |
+| `GEMINI_API_KEY` | Required only by the enrichment worker | none |
+| `AI_MODEL` | Gemini model identifier | `gemini-3.5-flash-lite` |
+| `AI_CLASSIFICATION_VERSION` | Rich output schema version | `v2` |
+| `AI_PROMPT_VERSION` | Persisted prompt version | `v2` |
+| `AI_MAX_ATTEMPTS` | Queue retries before terminal failure | `5` |
+| `AI_ENRICHMENT_LIMIT` | Maximum queue items processed per pipeline run | `5000` |
+| `SOURCE_TARGET_COUNT` | Desired active validated source inventory | `1000` |
+| `CRAWL_SOURCE_LIMIT` | Optional development/debug crawl cap | blank (all active sources) |
 | `APP_ENV` | Environment label | `development` |
-| `LOG_LEVEL` | stdout logging level | `INFO` |
+| `LOG_LEVEL` | stdout log level | `INFO` |
 
-The conservative drop guard also accepts `CRAWL_MASS_DROP_MIN_PREVIOUS_JOBS` (default
-`20`) and `CRAWL_MASS_DROP_RATIO` (default `0.25`). Production should inject secrets from
-Secret Manager; it does not need a `.env` file.
+The mass-drop guard also accepts `CRAWL_MASS_DROP_MIN_PREVIOUS_JOBS` (default `20`)
+and `CRAWL_MASS_DROP_RATIO` (default `0.25`). An anomalous crawl is recorded in
+`crawl_runs`, but its count never replaces `sources.last_job_count` as the trusted
+baseline.
 
-## Database and runtime commands
+## Database migrations
 
-Run these from `backend/` with the package installed:
+From `backend/` with `DATABASE_URL` configured:
 
 ```bash
 python -m jobly.commands.migrate
-python -m jobly.commands.seed_sources
-python -m jobly.commands.crawl
-python -m jobly.commands.enrich --limit 10
-python -m jobly.commands.pipeline --enrichment-limit 10
-uvicorn jobly.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The migration runner creates `schema_migrations` and applies each numbered SQL file once.
-It preserves the existing schema and ordered history. The crawler records individual
-source failures and continues; fatal configuration or database failures return non-zero.
+Migrations are ordered and idempotently recorded in `schema_migrations`. The new schema
+adds canonical companies, job versions/events, the enrichment queue, rich JSONB
+enrichments, daily company snapshots, pipeline runs, and database-backed source
+candidates. The legacy `jobs.company`, v1 columns, and `public_jobs` view remain.
 
-The API contract remains:
+## First production bootstrap
 
-- `GET /health`
-- `GET /api/jobs?limit=20&offset=0`
-- `GET /api/jobs/{job_id}`
-
-Only `public_jobs` is exposed. Non-U.S. jobs remain stored internally and do not consume
-Gemini work; ambiguous `Remote` alone is not U.S. evidence.
-
-## Frontend
-
-Set `frontend/.env.local`:
-
-```env
-JOBS_API_URL=http://localhost:8000
-USE_MOCK_DATA=false
-```
-
-Then run:
+CSV files are one-time import inputs only. Production source reconciliation reads
+`source_candidates` from PostgreSQL.
 
 ```bash
-cd frontend
-npm run dev
+cd backend
+python -m jobly.commands.migrate
+python -m jobly.commands.import_source_candidates \
+  --input ../data/cleaned/valid_sources.csv
+python -m jobly.commands.sync_sources --target 1000
+python -m jobly.commands.crawl
+python -m jobly.commands.bootstrap_enrichment
+python -m jobly.commands.enrich --limit 5000
+python -m jobly.commands.snapshot
 ```
 
-`JOBS_API_URL` is read only by the Next.js server proxy. Existing filters, API
-normalization, visibility refresh, and polling behavior are unchanged.
+`bootstrap_enrichment` is idempotent and does not call Gemini. New and changed jobs
+already have priorities 1 and 2; existing backlog receives priority 3.
+
+## Daily pipeline
+
+```bash
+cd backend
+python -m jobly.commands.pipeline
+```
+
+Useful development overrides:
+
+```bash
+python -m jobly.commands.pipeline \
+  --source-target 25 \
+  --source-limit 5 \
+  --enrichment-limit 20
+```
+
+The source target controls inventory reconciliation. The source limit controls only how
+many active sources this crawl executes. If the target is below the current active count,
+Jobly logs a warning and does not disable or delete sources.
+
+## APIs and frontend
+
+Core intelligence endpoints:
+
+- `GET /api/companies` and `GET /api/companies/{slug}`
+- `GET /api/companies/{slug}/trends`
+- `GET /api/trends`
+- `GET /api/roles` and `GET /api/roles/{role}`
+- `GET /api/skills` and `GET /api/skills/{skill}`
+
+Job-board compatibility endpoints remain `GET /api/jobs` and `GET /api/jobs/{job_id}`.
+Health endpoints are `/health`, `/health/live`, `/health/ready`, and `/health/system`.
+Low-coverage semantic aggregates are returned as unavailable rather than presented as a
+complete-market conclusion.
+
+The frontend uses `JOBS_API_URL` for both intelligence and job APIs. Routes are `/`,
+`/companies`, `/companies/[slug]`, `/roles`, `/roles/[role]`, `/skills`,
+`/skills/[skill]`, `/trends`, and `/jobs`.
 
 ## Tests and checks
 
@@ -119,49 +155,33 @@ cd backend
 pytest
 ruff check .
 
-# Optional live calls to external ATS APIs
-pytest -m integration
-
 cd ../frontend
 npm run check
 npm run build
 ```
 
-Unit tests use sanitized fixtures and do not need network access. Live ATS tests are
-marked `integration` and excluded from standard CI.
+Live ATS integration tests remain marked `integration` and are excluded by default.
 
 ## Docker
 
-```bash
-docker build -t jobly-backend ./backend
-docker run --rm -p 8080:8080 \
-  --env-file .env \
-  jobly-backend
-```
-
-The image runs as a non-root user and defaults to FastAPI. Override the command for jobs:
+The backend image must be built from the repository root so it contains both the package
+and root migrations:
 
 ```bash
-docker run --rm --env-file .env jobly-backend python -m jobly.commands.crawl
-docker run --rm --env-file .env jobly-backend python -m jobly.commands.enrich --limit 10
-docker run --rm --env-file .env jobly-backend python -m jobly.commands.pipeline
+docker build -f backend/Dockerfile -t jobly-backend .
+docker run --rm --env-file .env jobly-backend \
+  python -m jobly.commands.migrate
+docker run --rm --env-file .env jobly-backend \
+  python -m jobly.commands.pipeline
 ```
 
-## Production outline
+The default container command serves FastAPI on port 8080. See
+[`infra/gcp/README.md`](infra/gcp/README.md) for the Cloud Run deployment and one daily
+Scheduler execution in `America/Chicago`.
 
-- Vercel hosts `frontend/` and sets `JOBS_API_URL` to the FastAPI service URL.
-- A Cloud Run service runs the image's default FastAPI command.
-- A Cloud Run job overrides the command with `python -m jobly.commands.pipeline`.
-- Cloud SQL for PostgreSQL remains the source of truth.
-- Cloud Scheduler invokes the job at 09:00, 12:00, 14:00, and 16:00 in
-  `America/Chicago`.
-- Secret Manager supplies `DATABASE_URL` and `GEMINI_API_KEY`.
+## Intentionally deferred
 
-See [infra/gcp/README.md](infra/gcp/README.md) for deployment commands. Terraform and
-automatic deployment are intentionally deferred.
-
-## Maintenance scripts
-
-`scripts/clean_sources.py`, `scripts/validate_sources.py`, and
-`scripts/backfill_us_market.py` are explicit maintenance operations. `scripts/dev_soak.py`
-is a local-only soak utility with a sleeping loop; it is not part of production scheduling.
+Adaptive or multiple-daily crawling, AI-generated predictions, payments, resumes,
+auto-apply, recommendations, MCP, and alerts are outside this iteration. The first trend
+API is deterministic and reports unavailable periods when 7 or 30 days of history do not
+exist.

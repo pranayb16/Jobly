@@ -31,4 +31,4 @@ api:
 	cd backend && uvicorn jobly.api.main:app --reload --port 8000
 
 docker-build:
-	docker build -t jobly-backend ./backend
+	docker build -f backend/Dockerfile -t jobly-backend .

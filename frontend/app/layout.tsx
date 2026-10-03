@@ -5,10 +5,10 @@ import '../src/styles.css';
 
 export const metadata: Metadata = {
   title: {
-    default: 'Jobly — Fresh jobs from the last 48 hours',
+    default: 'Jobly — Hiring intelligence from employer career sites',
     template: '%s | Jobly',
   },
-  description: 'Find newly posted opportunities while they are still fresh. Jobly only shows jobs from the last 48 hours.',
+  description: 'Track company hiring activity, role demand, skills, and job changes over time.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -24,7 +24,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 <span className="brand-mark"><i /><i /></span>
                 <span>jobly</span>
               </Link>
-              <p>Every source. One fresh job index.</p>
+              <p>Career-site history turned into hiring intelligence.</p>
               <span>© {new Date().getFullYear()} Jobly</span>
             </div>
           </footer>

@@ -2,9 +2,9 @@ name: Backend
 
 on:
   push:
-    paths: ["backend/**", "migrations/**", ".github/workflows/backend.yml"]
+    paths: ["backend/**", "migrations/**", ".dockerignore", "Makefile", ".github/workflows/backend.yml"]
   pull_request:
-    paths: ["backend/**", "migrations/**", ".github/workflows/backend.yml"]
+    paths: ["backend/**", "migrations/**", ".dockerignore", "Makefile", ".github/workflows/backend.yml"]
 
 jobs:
   test:
@@ -23,3 +23,6 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: pytest
+      - name: Build backend image with migrations
+        working-directory: .
+        run: docker build -f backend/Dockerfile -t jobly-backend:ci .

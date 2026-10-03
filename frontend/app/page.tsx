@@ -1,52 +1,25 @@
-import { ArrowRight, BriefcaseBusiness, Check, Clock3, Database, MapPin, Search, SlidersHorizontal, Sparkles } from 'lucide-react';
 import Link from 'next/link';
+import { ArrowRight, Building2, DatabaseZap, LineChart, Sparkles } from 'lucide-react';
+import { Metric, Ranking } from '@/components/IntelligenceUI';
+import { CompanySnapshot, Trends, formatNumber, getIntelligence } from '@/lib/intelligence';
 
-const jobs = [
-  { company: 'Linear', role: 'Product Engineer', place: 'Remote · Americas', age: '38m', color: '#5b5bd6' },
-  { company: 'Vercel', role: 'Staff Product Designer', place: 'New York · Hybrid', age: '2h', color: '#171717' },
-  { company: 'Ramp', role: 'Growth Marketing Lead', place: 'San Francisco', age: '5h', color: '#237a57' },
-];
+type CompaniesPayload = { companies: CompanySnapshot[] };
 
-export default function HomePage() {
-  return <>
-    <section className="landing-hero">
-      <div className="landing-glow" />
-      <div className="shell landing-grid">
-        <div className="landing-copy">
-          <div className="landing-label"><span /> Updated continuously · nothing older than 48 hours</div>
-          <h1>Stop checking<br /><em>every careers page.</em></h1>
-          <p>Jobly pulls new openings from company career sites and ATS platforms into one focused, searchable job index.</p>
-          <div className="landing-search">
-            <Search size={19} />
-            <span>Job title, skill, company, or location</span>
-            <Link href="/jobs">Search jobs <ArrowRight size={16} /></Link>
-          </div>
-          <div className="landing-proof"><span><Check size={13} /> Direct company links</span><span><Check size={13} /> Multi-source search</span><span><Check size={13} /> Freshness verified</span></div>
-        </div>
+export default async function HomePage() {
+  const [trends, companiesPayload] = await Promise.all([
+    getIntelligence<Trends>('/api/trends'),
+    getIntelligence<CompaniesPayload>('/api/companies?limit=5'),
+  ]);
+  const companies = companiesPayload?.companies ?? [];
+  const hasData = Boolean(trends?.snapshot_date);
 
-        <div className="index-preview">
-          <div className="preview-top"><div><Database size={14} /><strong>Live job index</strong></div><span><i /> 1,248 new today</span></div>
-          <div className="preview-query"><Search size={15} /> Product design <kbd>⌘ K</kbd></div>
-          <div className="preview-layout">
-            <aside><strong><SlidersHorizontal size={13} /> Filters</strong><span className="active">Past 24 hours <b>412</b></span><span>Remote <b>286</b></span><span>Full-time <b>942</b></span><span>Entry level <b>174</b></span></aside>
-            <div className="preview-results">
-              <small>412 MATCHING ROLES</small>
-              {jobs.map((job) => <article key={job.company}><div style={{ background: job.color }}>{job.company[0]}</div><section><span>{job.company}<time><i />{job.age} ago</time></span><h3>{job.role}</h3><p><MapPin size={11} />{job.place}</p></section></article>)}
-            </div>
-          </div>
-          <div className="preview-status"><Sparkles size={13} /> Normalized across Greenhouse, Lever, Ashby, and company sites</div>
-        </div>
-      </div>
-    </section>
+  return <div className="intelligence-home">
+    <section className="intel-hero"><div className="shell intel-hero-grid"><div><span className="intel-kicker"><i /> Daily employer intelligence</span><h1>See how companies are <em>actually hiring.</em></h1><p>Jobly tracks employer career sites over time, preserves every meaningful change, and turns job data into comparable hiring signals.</p><div className="intel-actions"><Link href="/companies">Explore companies <ArrowRight size={16} /></Link><Link href="/trends">View market trends</Link></div></div><div className="pipeline-card"><div><DatabaseZap size={19} /><strong>Daily intelligence pipeline</strong><span>{hasData ? 'Current' : 'Awaiting first run'}</span></div>{['Career sites crawled', 'Changes preserved', 'Jobs enriched', 'Snapshots generated'].map((item, index) => <p key={item}><b>{index + 1}</b>{item}<i /></p>)}<small>{trends?.snapshot_date ? `Latest snapshot · ${trends.snapshot_date}` : 'Run the pipeline to establish the first baseline'}</small></div></div></section>
 
-    <section className="source-strip"><div className="shell"><span>ONE SEARCH ACROSS</span><strong>Greenhouse</strong><strong>Lever</strong><strong>Ashby</strong><strong>Company sites</strong><strong>+ more sources</strong></div></section>
+    <section className="shell intel-overview"><div className="section-title"><div><span>MARKET OVERVIEW</span><h2>Today&apos;s hiring surface</h2></div><Link href="/trends">Full trends <ArrowRight size={14} /></Link></div><div className="metric-grid"><Metric label="Companies tracked" value={trends?.companies_tracked ?? 0} note="canonical employers" /><Metric label="Active openings" value={trends?.total_open_jobs ?? 0} note="current career-site listings" /><Metric label="Added today" value={trends?.new_jobs ?? 0} note="newly observed roles" /><Metric label="Removed today" value={trends?.removed_jobs ?? 0} note="closed or delisted roles" /><Metric label="Enrichment coverage" value={`${Math.round((trends?.enrichment_coverage ?? 0) * 100)}%`} note="AI aggregates disclose coverage" /></div></section>
 
-    <section className="product-story" id="how-it-works"><div className="shell"><div className="story-heading"><span>THE AGGREGATOR DIFFERENCE</span><h2>More signal.<br />Less tab chaos.</h2><p>A job search should feel like a workspace—not a pile of career pages.</p></div><div className="story-grid">
-      <article><Clock3 size={20} /><b>01</b><h3>Actually fresh</h3><p>Every result is posted within 48 hours, so you apply while teams are actively looking.</p></article>
-      <article><SlidersHorizontal size={20} /><b>02</b><h3>Filter the whole market</h3><p>Refine roles across companies and sources without relearning a different career site each time.</p></article>
-      <article><BriefcaseBusiness size={20} /><b>03</b><h3>Apply at the source</h3><p>Review normalized details here, then continue directly to the original company listing.</p></article>
-    </div></div></section>
+    <section className="shell intel-split">{trends?.top_roles ? <Ranking title="Top roles" items={trends.top_roles} basePath="/roles" /> : <div className="coverage-card"><Sparkles size={20} /><h2>Role intelligence is building</h2><p>AI-derived rankings appear once enrichment coverage reaches the publication threshold.</p></div>}{trends?.top_skills ? <Ranking title="Top skills" items={trends.top_skills} basePath="/skills" /> : <div className="coverage-card"><LineChart size={20} /><h2>Skill intelligence is building</h2><p>Deterministic totals remain available while semantic coverage catches up.</p></div>}</section>
 
-    <section className="landing-cta"><div className="shell"><div><span>YOUR NEXT ROLE MAY HAVE POSTED AN HOUR AGO</span><h2>See what just opened.</h2></div><Link href="/jobs">Open the live index <ArrowRight size={18} /></Link></div></section>
-  </>;
+    <section className="shell company-preview"><div className="section-title"><div><span>COMPANY PULSE</span><h2>Largest active hiring footprints</h2></div><Link href="/companies">All companies <ArrowRight size={14} /></Link></div><div className="company-grid">{companies.map((company) => <Link href={`/companies/${company.slug}`} key={company.id}><Building2 size={18} /><strong>{company.name}</strong><span>{formatNumber(company.total_open_jobs)} openings</span><small>+{company.new_jobs ?? 0} / −{company.removed_jobs ?? 0} today</small></Link>)}{companies.length === 0 && <p className="inline-empty">No company snapshots yet.</p>}</div></section>
+  </div>;
 }
