@@ -3169,22 +3169,6 @@ def process_item(
         result.usage,
     )
 
-
-
-    saved = save_success(
-
-        conn,
-
-        item,
-
-        result.classification,
-
-        result.usage,
-
-    )
-
-
-
     if not saved:
 
         return "stale", result.usage

@@ -37,8 +37,9 @@ def _ratio(name: str, default: float) -> float:
 class Settings:
     database_url: str | None
     frontend_origin: str
-    gemini_api_key: str | None
-    ai_model: str
+    openrouter_api_key: str | None
+    openrouter_free_model: str
+    openrouter_paid_model: str
     ai_classification_version: str
     ai_prompt_version: str
     ai_max_attempts: int
@@ -68,8 +69,23 @@ def get_settings() -> Settings:
     return Settings(
         database_url=os.getenv("DATABASE_URL", "").strip() or None,
         frontend_origin=os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").strip(),
-        gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
-        ai_model=os.getenv("AI_MODEL", "gemini-3.5-flash-lite").strip(),
+        openrouter_api_key=(
+            os.getenv(
+                "OPENROUTER_API_KEY",
+                "",
+            ).strip()
+            or None
+        ),
+
+        openrouter_free_model=os.getenv(
+            "OPENROUTER_FREE_MODEL",
+            "openai/gpt-oss-20b:free",
+        ).strip(),
+
+        openrouter_paid_model=os.getenv(
+            "OPENROUTER_PAID_MODEL",
+            "openai/gpt-oss-20b",
+        ).strip(),
         ai_classification_version=os.getenv(
             "AI_CLASSIFICATION_VERSION",
             "v3",
@@ -88,3 +104,10 @@ def get_settings() -> Settings:
         mass_drop_min_previous_jobs=_positive_int("CRAWL_MASS_DROP_MIN_PREVIOUS_JOBS", 20),
         mass_drop_ratio=_ratio("CRAWL_MASS_DROP_RATIO", 0.25),
     )
+
+def require_openrouter_api_key(self) -> str:
+    if not self.openrouter_api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not configured"
+        )
+    return self.openrouter_api_key

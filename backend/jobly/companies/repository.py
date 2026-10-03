@@ -35,8 +35,14 @@ def ensure_company(cur, name: str | None, website_domain: str | None = None) -> 
 
     cur.execute(
         """
-        INSERT INTO companies (name, normalized_name, slug, website_domain)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO companies (
+            name,
+            normalized_name,
+            slug,
+            website_domain,
+            tracking_started_at
+        )
+        VALUES (%s, %s, %s, %s, NOW())
         ON CONFLICT (normalized_name) DO UPDATE
         SET website_domain = COALESCE(companies.website_domain, EXCLUDED.website_domain),
             updated_at = NOW()
