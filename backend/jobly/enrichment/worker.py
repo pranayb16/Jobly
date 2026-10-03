@@ -1682,7 +1682,7 @@ def save_success(
 
             "model":
 
-                settings.ai_model,
+                settings.openrouter_paid_model,
 
 
 

@@ -56,10 +56,12 @@ class Settings:
             raise RuntimeError("DATABASE_URL is not configured")
         return self.database_url
 
-    def require_gemini_api_key(self) -> str:
-        if not self.gemini_api_key:
-            raise RuntimeError("GEMINI_API_KEY is not configured")
-        return self.gemini_api_key
+    def require_openrouter_api_key(self) -> str:
+        if not self.openrouter_api_key:
+            raise RuntimeError(
+                "OPENROUTER_API_KEY is not configured"
+            )
+        return self.openrouter_api_key
 
 
 @lru_cache(maxsize=1)
