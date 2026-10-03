@@ -81,7 +81,10 @@ def build_snapshots(snapshot_date: date | None = None) -> SnapshotSummary:
                     """
                     SELECT
                         (SELECT COUNT(*) FROM jobs WHERE company_id = %s AND active = TRUE),
-                        COUNT(*) FILTER (WHERE e.event_type = 'created'),
+                        COUNT(*) FILTER (
+                            WHERE e.event_type = 'created'
+                            AND (e.metadata->>'baseline') IS DISTINCT FROM 'true'
+                        ),
                         COUNT(*) FILTER (WHERE e.event_type = 'removed'),
                         COUNT(*) FILTER (WHERE e.event_type = 'changed')
                     FROM job_events AS e

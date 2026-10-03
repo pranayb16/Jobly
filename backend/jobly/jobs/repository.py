@@ -19,6 +19,7 @@ class JobSaveResult:
     created: bool = False
     changed: bool = False
     reactivated: bool = False
+    baseline: bool = False
 
 
 def evaluate_mass_drop(
@@ -82,13 +83,26 @@ def _record_event(
     event_type: str,
     crawl_run_id: int | None,
     pipeline_run_id: int | None,
+    metadata: dict | None = None,
 ) -> None:
     cur.execute(
         """
-        INSERT INTO job_events (job_id, event_type, crawl_run_id, pipeline_run_id)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO job_events (
+            job_id,
+            event_type,
+            crawl_run_id,
+            pipeline_run_id,
+            metadata
+        )
+        VALUES (%s, %s, %s, %s, %s)
         """,
-        (job_id, event_type, crawl_run_id, pipeline_run_id),
+        (
+            job_id,
+            event_type,
+            crawl_run_id,
+            pipeline_run_id,
+            Jsonb(metadata or {}),
+        ),
     )
 
 
@@ -102,6 +116,7 @@ def save_job(
     pipeline_run_id: int | None = None,
 ) -> JobSaveResult:
     content_hash = build_content_hash(job)
+    is_baseline = previous_success_at is None
     observed_new_after = previous_success_at if job.posted_at is None else None
     observed_new_before = crawl_started_at if observed_new_after is not None else None
     company_id = ensure_company(cur, job.company)
@@ -158,9 +173,36 @@ def save_job(
             ),
         )
         job_id = cur.fetchone()[0]
-        _record_event(cur, job_id, "created", crawl_run_id, pipeline_run_id)
-        enqueue_enrichment(cur, job_id, content_hash, reason="new_job", priority=1)
-        return JobSaveResult(created=True)
+        _record_event(
+            cur,
+            job_id,
+            "created",
+            crawl_run_id,
+            pipeline_run_id,
+            metadata={"baseline": is_baseline},
+        )
+
+        if is_baseline:
+            enqueue_enrichment(
+                cur,
+                job_id,
+                content_hash,
+                reason="bootstrap",
+                priority=3,
+            )
+        else:
+            enqueue_enrichment(
+                cur,
+                job_id,
+                content_hash,
+                reason="new_job",
+                priority=1,
+            )
+
+        return JobSaveResult(
+            created=True,
+            baseline=is_baseline,
+        )
 
     (
         job_id,

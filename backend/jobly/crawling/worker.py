@@ -80,7 +80,7 @@ def run_crawl(
                             job,
                             pipeline_run_id,
                         )
-                        jobs_new += int(result.created)
+                        jobs_new += int(result.created and not result.baseline)
                         jobs_changed += int(result.changed)
 
                     if decision.allowed:
