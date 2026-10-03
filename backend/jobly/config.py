@@ -70,8 +70,15 @@ def get_settings() -> Settings:
         frontend_origin=os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").strip(),
         gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
         ai_model=os.getenv("AI_MODEL", "gemini-3.5-flash-lite").strip(),
-        ai_classification_version=os.getenv("AI_CLASSIFICATION_VERSION", "v2").strip(),
-        ai_prompt_version=os.getenv("AI_PROMPT_VERSION", "v2").strip(),
+        ai_classification_version=os.getenv(
+            "AI_CLASSIFICATION_VERSION",
+            "v3",
+        ).strip(),
+
+        ai_prompt_version=os.getenv(
+            "AI_PROMPT_VERSION",
+            "v3",
+        ).strip(),
         ai_max_attempts=_positive_int("AI_MAX_ATTEMPTS", 5),
         ai_enrichment_limit=_positive_int("AI_ENRICHMENT_LIMIT", 5000),
         source_target_count=_positive_int("SOURCE_TARGET_COUNT", 1000),

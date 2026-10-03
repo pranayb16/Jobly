@@ -7,43 +7,131 @@ from jobly.db.connection import get_connection
 from jobly.logging_config import configure_logging
 
 
-def enqueue_bootstrap(conn, schema_version: str) -> int:
+def enqueue_bootstrap(
+    conn,
+    schema_version: str,
+) -> int:
+    """
+    Queue all current active jobs that do not have enrichment
+    for their current content hash and requested schema version.
+
+    Existing completed/failed queue records are reopened because
+    they may have been processed under an older enrichment schema.
+
+    Existing pending/processing work is left untouched.
+    """
+
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO enrichment_queue (job_id, content_hash, priority, reason)
-            SELECT j.id, j.content_hash, 3, 'bootstrap'
+            INSERT INTO enrichment_queue (
+                job_id,
+                content_hash,
+                priority,
+                reason
+            )
+
+            SELECT
+                j.id,
+                j.content_hash,
+                3,
+                'bootstrap'
+
             FROM jobs AS j
+
             WHERE j.active = TRUE
+
               AND j.content_hash IS NOT NULL
+
+              -- Do not repeatedly enrich jobs already known to
+              -- be outside the U.S. market.
+              AND j.is_us_job IS DISTINCT FROM FALSE
+
+              -- Only queue jobs that do not already have the
+              -- requested current enrichment.
               AND NOT EXISTS (
                   SELECT 1
+
                   FROM job_enrichments AS e
+
                   WHERE e.job_id = j.id
-                    AND e.content_hash = j.content_hash
+
+                    AND e.content_hash =
+                        j.content_hash
+
                     AND e.schema_version = %s
               )
-            ON CONFLICT (job_id, content_hash) DO NOTHING
+
+            ON CONFLICT (
+                job_id,
+                content_hash
+            )
+
+            DO UPDATE SET
+
+                status = 'pending',
+
+                priority = 3,
+
+                reason = 'bootstrap',
+
+                attempts = 0,
+
+                started_at = NULL,
+
+                completed_at = NULL,
+
+                last_error = NULL
+
+            WHERE enrichment_queue.status
+                  IN (
+                      'completed',
+                      'failed'
+                  )
             """,
-            (schema_version,),
+            (
+                schema_version,
+            ),
         )
+
         queued = cur.rowcount
+
     conn.commit()
+
     return queued
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Idempotently queue current jobs that lack enrichment."
+        description=(
+            "Idempotently queue current jobs "
+            "that lack current enrichment."
+        )
     )
+
     parser.add_argument(
-        "--schema-version", default=get_settings().ai_classification_version
+        "--schema-version",
+        default=(
+            get_settings()
+            .ai_classification_version
+        ),
     )
+
     args = parser.parse_args()
+
     configure_logging()
+
     with get_connection() as conn:
-        queued = enqueue_bootstrap(conn, args.schema_version)
-    print(f"Queued {queued} bootstrap enrichment items")
+        queued = enqueue_bootstrap(
+            conn,
+            args.schema_version,
+        )
+
+    print(
+        "Bootstrap enrichment queue complete | "
+        f"schema={args.schema_version} | "
+        f"queued_or_reopened={queued}"
+    )
 
 
 if __name__ == "__main__":

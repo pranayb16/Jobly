@@ -1,7 +1,278 @@
 import hashlib
 import json
+import re
 from typing import Any
 
+
+# ============================================================
+# DESCRIPTION COMPACTION
+# ============================================================
+
+BOILERPLATE_HEADINGS = (
+    "about us",
+    "about the company",
+    "our company",
+    "our culture",
+    "culture",
+    "what we offer",
+    "benefits",
+    "our benefits",
+    "perks",
+    "perks and benefits",
+    "health and wellbeing",
+    "growth and future",
+    "community",
+    "equal opportunity",
+    "equal employment opportunity",
+    "diversity and inclusion",
+    "diversity, equity and inclusion",
+    "accommodation",
+    "accommodations",
+    "candidate privacy",
+    "privacy notice",
+    "our approach to remote work",
+    "how we work with ai",
+)
+
+
+RELEVANT_HEADINGS = (
+    "about the role",
+    "about the job",
+    "the role",
+    "role overview",
+    "position overview",
+    "what you'll do",
+    "what you’ll do",
+    "what you will do",
+    "what you will build",
+    "responsibilities",
+    "your responsibilities",
+    "what we're looking for",
+    "what we’re looking for",
+    "what we are looking for",
+    "requirements",
+    "minimum requirements",
+    "minimum qualifications",
+    "qualifications",
+    "preferred qualifications",
+    "preferred requirements",
+    "skills",
+    "experience",
+    "education",
+    "compensation",
+    "salary",
+    "pay range",
+    "location",
+    "work authorization",
+    "visa sponsorship",
+    "security clearance",
+)
+
+
+LEGAL_PATTERNS = (
+    "equal opportunity employer",
+    "equal employment opportunity",
+    "do not discriminate on the basis",
+    "reasonable accommodation",
+    "accommodation is available",
+    "candidate privacy notice",
+    "privacy policy",
+    "background check may consist",
+    "successful applicants will be required to complete a background check",
+    "artificial intelligence (ai) and machine learning (ml) technologies",
+    "assist in the initial screening of employment applications",
+)
+
+
+def _normalize_heading(
+    value: str,
+) -> str:
+    value = value.strip().lower()
+
+    value = re.sub(
+        r"[:\-–—]+$",
+        "",
+        value,
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
+
+    return value.strip()
+
+
+def _looks_like_heading(
+    value: str,
+) -> bool:
+    value = value.strip()
+
+    if not value:
+        return False
+
+    if len(value) > 100:
+        return False
+
+    if value.startswith(
+        (
+            "-",
+            "•",
+            "*",
+        )
+    ):
+        return False
+
+    # Long normal sentences are unlikely to be headings.
+    if (
+        value.endswith(".")
+        and len(value.split()) > 8
+    ):
+        return False
+
+    return True
+
+
+def _is_boilerplate_heading(
+    value: str,
+) -> bool:
+    normalized = _normalize_heading(
+        value
+    )
+
+    if normalized.startswith("about "):
+        # Keep role-specific "about the role/job",
+        # but drop company biography sections.
+        if normalized in {
+            "about the role",
+            "about the job",
+            "about this role",
+        }:
+            return False
+
+        return True
+
+    return normalized in BOILERPLATE_HEADINGS
+
+
+def _is_relevant_heading(
+    value: str,
+) -> bool:
+    normalized = _normalize_heading(
+        value
+    )
+
+    return normalized in RELEVANT_HEADINGS
+
+
+def _is_legal_boilerplate(
+    value: str,
+) -> bool:
+    lowered = value.lower()
+
+    return any(
+        pattern in lowered
+        for pattern in LEGAL_PATTERNS
+    )
+
+
+def compact_description(
+    description: str,
+) -> str:
+    """
+    Remove obvious company/legal/benefits boilerplate before
+    sending a job description to the AI model.
+
+    Important:
+    - This affects AI input only.
+    - build_content_hash() still uses the complete original JD.
+    """
+
+    if not description:
+        return ""
+
+    # Normalize newlines and excessive spaces while preserving
+    # sections/bullets.
+    description = description.replace(
+        "\r\n",
+        "\n",
+    ).replace(
+        "\r",
+        "\n",
+    )
+
+    lines = []
+
+    for raw_line in description.split("\n"):
+        line = re.sub(
+            r"[ \t]+",
+            " ",
+            raw_line,
+        ).strip()
+
+        if line:
+            lines.append(line)
+
+    if not lines:
+        return ""
+
+    kept: list[str] = []
+
+    skipping_boilerplate = False
+
+    for line in lines:
+        heading_like = _looks_like_heading(
+            line
+        )
+
+        if (
+            heading_like
+            and _is_boilerplate_heading(
+                line
+            )
+        ):
+            skipping_boilerplate = True
+            continue
+
+        if (
+            heading_like
+            and _is_relevant_heading(
+                line
+            )
+        ):
+            skipping_boilerplate = False
+            kept.append(line)
+            continue
+
+        if skipping_boilerplate:
+            continue
+
+        if _is_legal_boilerplate(
+            line
+        ):
+            continue
+
+        kept.append(line)
+
+    compacted = "\n".join(
+        kept
+    ).strip()
+
+    # Safety fallback:
+    # if a strange JD structure causes us to remove too much,
+    # send the original description instead.
+    if len(compacted) < 500:
+        compacted = "\n".join(
+            lines
+        )
+
+    return compacted
+
+
+# ============================================================
+# GENERAL HELPERS
+# ============================================================
 
 def unique_strings(values):
     result = []
@@ -55,6 +326,10 @@ def format_postal_address(
     return ", ".join(parts)
 
 
+# ============================================================
+# GREENHOUSE
+# ============================================================
+
 def extract_greenhouse_context(
     raw: dict,
 ) -> dict:
@@ -87,16 +362,24 @@ def extract_greenhouse_context(
         "offices",
         [],
     ):
-        if not isinstance(office, dict):
+        if not isinstance(
+            office,
+            dict,
+        ):
             continue
 
-        office_name = office.get("name")
+        office_name = office.get(
+            "name"
+        )
+
         office_location = office.get(
             "location"
         )
 
         if office_name:
-            offices.append(office_name)
+            offices.append(
+                office_name
+            )
 
         if office_location:
             locations.append(
@@ -104,21 +387,29 @@ def extract_greenhouse_context(
             )
 
     return {
-        "departments": unique_strings(
-            departments
-        ),
+        "departments":
+            unique_strings(
+                departments
+            ),
 
-        "teams": [],
+        "teams":
+            [],
 
-        "locations": unique_strings(
-            locations
-        ),
+        "locations":
+            unique_strings(
+                locations
+            ),
 
-        "offices": unique_strings(
-            offices
-        ),
+        "offices":
+            unique_strings(
+                offices
+            ),
     }
 
+
+# ============================================================
+# ASHBY
+# ============================================================
 
 def extract_ashby_context(
     raw: dict,
@@ -136,7 +427,9 @@ def extract_ashby_context(
     )
 
     if address:
-        locations.append(address)
+        locations.append(
+            address
+        )
 
     for secondary in raw.get(
         "secondaryLocations",
@@ -154,14 +447,18 @@ def extract_ashby_context(
         )
 
         if location:
-            locations.append(location)
+            locations.append(
+                location
+            )
 
         address = format_postal_address(
             secondary.get("address")
         )
 
         if address:
-            locations.append(address)
+            locations.append(
+                address
+            )
 
     departments = []
 
@@ -178,21 +475,29 @@ def extract_ashby_context(
         )
 
     return {
-        "departments": unique_strings(
-            departments
-        ),
+        "departments":
+            unique_strings(
+                departments
+            ),
 
-        "teams": unique_strings(
-            teams
-        ),
+        "teams":
+            unique_strings(
+                teams
+            ),
 
-        "locations": unique_strings(
-            locations
-        ),
+        "locations":
+            unique_strings(
+                locations
+            ),
 
-        "offices": [],
+        "offices":
+            [],
     }
 
+
+# ============================================================
+# LEVER
+# ============================================================
 
 def extract_lever_context(
     raw: dict,
@@ -211,7 +516,9 @@ def extract_lever_context(
 
     locations = []
 
-    if categories.get("location"):
+    if categories.get(
+        "location"
+    ):
         locations.append(
             categories["location"]
         )
@@ -231,34 +538,46 @@ def extract_lever_context(
 
     departments = []
 
-    if categories.get("department"):
+    if categories.get(
+        "department"
+    ):
         departments.append(
             categories["department"]
         )
 
     teams = []
 
-    if categories.get("team"):
+    if categories.get(
+        "team"
+    ):
         teams.append(
             categories["team"]
         )
 
     return {
-        "departments": unique_strings(
-            departments
-        ),
+        "departments":
+            unique_strings(
+                departments
+            ),
 
-        "teams": unique_strings(
-            teams
-        ),
+        "teams":
+            unique_strings(
+                teams
+            ),
 
-        "locations": unique_strings(
-            locations
-        ),
+        "locations":
+            unique_strings(
+                locations
+            ),
 
-        "offices": [],
+        "offices":
+            [],
     }
 
+
+# ============================================================
+# STRUCTURED ATS CONTEXT
+# ============================================================
 
 def extract_structured_context(
     provider: str,
@@ -292,79 +611,58 @@ def extract_structured_context(
     }
 
 
+# ============================================================
+# AI PAYLOAD
+# ============================================================
+
 def build_classifier_payload(
     row: dict[str, Any],
 ) -> dict:
+    """
+    Build the smallest useful semantic payload for Gemini.
 
-    raw = row.get("raw_payload") or {}
+    Structured ATS facts are added separately by worker.py as
+    trusted_structured_context, so they are intentionally not
+    duplicated here.
+    """
 
-    if isinstance(raw, str):
-        raw = json.loads(raw)
-
-    structured_context = (
-        extract_structured_context(
-            row["provider"],
-            raw,
+    description = (
+        row.get(
+            "description_text"
         )
+        or ""
     )
 
     return {
-        "original_title": row["title"],
+        "original_title":
+            row["title"],
 
-        "company": row.get("company"),
-
-        "provider": row["provider"],
-
-        "department": (
-            structured_context[
-                "departments"
-            ]
-        ),
-
-        "team": (
-            structured_context[
-                "teams"
-            ]
-        ),
-
-        "primary_location": (
-            row.get("location")
-        ),
-
-        "structured_locations": (
-            structured_context[
-                "locations"
-            ]
-        ),
-
-        "offices": (
-            structured_context[
-                "offices"
-            ]
-        ),
-
-        "employment_type": (
+        "company":
             row.get(
-                "employment_type"
-            )
-        ),
+                "company"
+            ),
 
-        "workplace_type": (
-            row.get(
-                "workplace_type"
-            )
-        ),
-
-        "description": (
-            row.get(
-                "description_text"
-            )
-            or ""
-        ),
+        "description":
+            compact_description(
+                description
+            ),
     }
 
 
-def build_content_hash(job) -> str:
+# ============================================================
+# CONTENT HASH
+# ============================================================
+
+def build_content_hash(
+    job,
+) -> str:
+    """
+    Content hash intentionally continues to use the complete
+    original job description.
+
+    AI input compaction must never prevent Jobly from noticing
+    that the underlying posting changed.
+    """
 
     structured_context = (
         extract_structured_context(
@@ -374,27 +672,26 @@ def build_content_hash(job) -> str:
     )
 
     payload = {
-        "title": job.title,
+        "title":
+            job.title,
 
-        "company": job.company,
+        "company":
+            job.company,
 
-        "location": job.location,
+        "location":
+            job.location,
 
-        "employment_type": (
-            job.employment_type
-        ),
+        "employment_type":
+            job.employment_type,
 
-        "workplace_type": (
-            job.workplace_type
-        ),
+        "workplace_type":
+            job.workplace_type,
 
-        "description": (
-            job.description.text
-        ),
+        "description":
+            job.description.text,
 
-        "structured_context": (
-            structured_context
-        ),
+        "structured_context":
+            structured_context,
     }
 
     serialized = json.dumps(
@@ -405,5 +702,7 @@ def build_content_hash(job) -> str:
     )
 
     return hashlib.sha256(
-        serialized.encode("utf-8")
+        serialized.encode(
+            "utf-8"
+        )
     ).hexdigest()
