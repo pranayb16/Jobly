@@ -23,7 +23,3 @@ GROUP BY
     c.id,
     c.name,
     c.tracking_started_at;
-
-SELECT *
-FROM company_tracking_summary
-ORDER BY company_id;

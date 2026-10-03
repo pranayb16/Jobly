@@ -106,10 +106,3 @@ def get_settings() -> Settings:
         mass_drop_min_previous_jobs=_positive_int("CRAWL_MASS_DROP_MIN_PREVIOUS_JOBS", 20),
         mass_drop_ratio=_ratio("CRAWL_MASS_DROP_RATIO", 0.25),
     )
-
-def require_openrouter_api_key(self) -> str:
-    if not self.openrouter_api_key:
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is not configured"
-        )
-    return self.openrouter_api_key

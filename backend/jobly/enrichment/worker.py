@@ -61,31 +61,19 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-
 class EnrichmentSummary:
-
     processed: int
-
+    ai_calls: int
     completed: int
-
     failed: int
-
     stale: int
-
     skipped_non_us: int
-
     backlog: int
 
-
-
     input_tokens: int
-
     output_tokens: int
-
     thought_tokens: int
-
     cached_tokens: int
-
     total_tokens: int
 
 
@@ -3182,239 +3170,133 @@ def process_item(
 
 
 def run_enrichment(
-
     limit: int | None = None,
-
 ) -> EnrichmentSummary:
 
     limit = (
-
         limit
-
         or get_settings().ai_enrichment_limit
-
     )
 
-
-
     if limit < 1:
-
         raise ValueError(
-
             "enrichment limit must be at least 1"
-
         )
 
-
-
+    # Queue rows examined.
     processed = 0
 
+    # Actual AI classifications completed.
+    ai_calls = 0
+
     completed = 0
-
     failed = 0
-
     stale = 0
-
     skipped_non_us = 0
 
-
-
     input_tokens = 0
-
     output_tokens = 0
-
     thought_tokens = 0
-
     cached_tokens = 0
-
     total_tokens = 0
-
-
 
     with get_connection() as conn:
 
-        recover_stale_queue(
+        recover_stale_queue(conn)
 
-            conn
+        # IMPORTANT:
+        # limit now controls actual AI calls,
+        # not queue items.
+        while ai_calls < limit:
 
-        )
-
-
-
-        while processed < limit:
-
-            item = claim_next_queue_item(
-
-                conn
-
-            )
-
-
+            item = claim_next_queue_item(conn)
 
             if item is None:
-
                 break
 
-
-
             processed += 1
-
-
 
             try:
 
                 result, usage = process_item(
-
                     conn,
-
                     item,
-
                 )
-
-
 
                 completed += int(
-
-                    result
-
-                    in {
-
+                    result in {
                         "completed",
-
                         "skipped_non_us",
-
                     }
-
                 )
-
-
 
                 stale += int(
-
                     result == "stale"
-
                 )
-
-
 
                 skipped_non_us += int(
-
-                    result
-
-                    == "skipped_non_us"
-
+                    result == "skipped_non_us"
                 )
 
-
-
+                # usage exists only when the job
+                # actually reached the AI classifier.
                 if usage is not None:
 
+                    ai_calls += 1
+
                     input_tokens += (
-
                         usage.input_tokens
-
                     )
-
-
 
                     output_tokens += (
-
                         usage.output_tokens
-
                     )
-
-
 
                     thought_tokens += (
-
                         usage.thought_tokens
-
                     )
-
-
 
                     cached_tokens += (
-
                         usage.cached_tokens
-
                     )
-
-
 
                     total_tokens += (
-
                         usage.total_tokens
-
                     )
-
-
 
             except Exception as exc:
 
                 logger.exception(
-
                     "enrichment_failed "
-
                     "queue_id=%s job_id=%s",
-
                     item["queue_id"],
-
                     item["id"],
-
                 )
-
-
 
                 save_failure(
-
                     conn,
-
                     item,
-
                     exc,
-
                 )
-
-
 
                 failed += 1
 
-
-
-        backlog = count_backlog(
-
-            conn
-
-        )
-
-
+        backlog = count_backlog(conn)
 
     return EnrichmentSummary(
-
         processed=processed,
-
+        ai_calls=ai_calls,
         completed=completed,
-
         failed=failed,
-
         stale=stale,
-
         skipped_non_us=skipped_non_us,
-
         backlog=backlog,
 
-
-
         input_tokens=input_tokens,
-
         output_tokens=output_tokens,
-
         thought_tokens=thought_tokens,
-
         cached_tokens=cached_tokens,
-
         total_tokens=total_tokens,
-
     )
 
 
@@ -3466,35 +3348,20 @@ def main() -> None:
 
 
     print(
-
         "Enrichment complete | "
-
         f"processed={summary.processed} | "
-
+        f"ai_calls={summary.ai_calls} | "
         f"completed={summary.completed} | "
-
         f"failed={summary.failed} | "
-
         f"stale={summary.stale} | "
-
         f"skipped_non_us={summary.skipped_non_us} | "
-
         f"backlog={summary.backlog} | "
-
         f"input_tokens={summary.input_tokens} | "
-
         f"output_tokens={summary.output_tokens} | "
-
         f"thought_tokens={summary.thought_tokens} | "
-
         f"cached_tokens={summary.cached_tokens} | "
-
         f"total_tokens={summary.total_tokens}"
-
     )
-
-
-
 
 
 if __name__ == "__main__":
