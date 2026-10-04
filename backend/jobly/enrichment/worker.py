@@ -75,6 +75,8 @@ class EnrichmentSummary:
     cached_tokens: int
     total_tokens: int
 
+    model_counts: dict[str, int]
+
 
 
 
@@ -3394,6 +3396,7 @@ def process_item(
 
 def run_enrichment(
     limit: int | None = None,
+    pipeline_run_id: int | None = None,
 ) -> EnrichmentSummary:
 
     limit = (
@@ -3422,6 +3425,8 @@ def run_enrichment(
     thought_tokens = 0
     cached_tokens = 0
     total_tokens = 0
+
+    model_counts: dict[str, int] = {}
 
     attempted_queue_ids: set[int] = set()
     with get_connection() as conn:
@@ -3496,6 +3501,21 @@ def run_enrichment(
                         usage.total_tokens
                     )
 
+                    model_name = (
+                        usage.model
+                        or "unknown"
+                    )
+
+                    model_counts[
+                        model_name
+                    ] = (
+                        model_counts.get(
+                            model_name,
+                            0,
+                        )
+                        + 1
+                    )
+
             except Exception as exc:
 
                 logger.exception(
@@ -3529,6 +3549,8 @@ def run_enrichment(
         thought_tokens=thought_tokens,
         cached_tokens=cached_tokens,
         total_tokens=total_tokens,
+
+        model_counts=model_counts,
     )
 
 

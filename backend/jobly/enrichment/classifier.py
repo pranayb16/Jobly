@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+import logging
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 
 import requests
@@ -128,6 +130,8 @@ def _request_openrouter(
 
     settings = get_settings()
 
+
+
     body = {
         "model": model,
 
@@ -156,9 +160,13 @@ def _request_openrouter(
 
     # GPT-OSS is used only as paid fallback.
     # Keep reasoning low for extraction work.
-    if model == settings.openrouter_paid_model:
+    if model == settings.openrouter_free_model:
         body["reasoning"] = {
-            "effort": "none",
+            "enabled": False,
+        }
+    elif model == settings.openrouter_paid_model:
+        body["reasoning"] = {
+            "effort": "low",
         }
 
     return requests.post(
@@ -409,28 +417,42 @@ def classify_job(
     # FREE FIRST — FOR EVERY JOB
     # ========================================================
 
+    logger.info(
+        "AI free attempt | model=%s",
+        settings.openrouter_free_model,
+    )
+
     _wait_for_free_request_slot()
 
     free_response: requests.Response | None = None
 
     try:
         free_response = _request_openrouter(
-        model=settings.openrouter_free_model,
-        messages=messages,
-        response_schema=response_schema,
-    )
+            model=settings.openrouter_free_model,
+            messages=messages,
+            response_schema=response_schema,
+        )
 
-    except requests.RequestException:
-        # Network/provider failure.
-        # Paid fallback for this job only.
+    except requests.RequestException as exc:
+
+        logger.warning(
+            "AI free failed | model=%s | "
+            "reason=request_error | error=%s | "
+            "falling_back_to=%s",
+            settings.openrouter_free_model,
+            exc,
+            settings.openrouter_paid_model,
+        )
+
         free_response = None
+
 
     if free_response is not None:
 
         if free_response.ok:
 
             try:
-                return _parse_response(
+                free_result = _parse_response(
                     free_response,
                     model_class=model_class,
                     fallback_model=(
@@ -438,30 +460,64 @@ def classify_job(
                     ),
                 )
 
-            except Exception:
-                # Free response was unusable or failed
-                # schema/semantic validation.
-                #
-                # Try paid for this job.
-                pass
+                logger.info(
+                    "AI free success | "
+                    "requested_model=%s | "
+                    "actual_model=%s",
+                    settings.openrouter_free_model,
+                    free_result.usage.model,
+                )
+
+                return free_result
+
+            except Exception as exc:
+
+                logger.warning(
+                    "AI free rejected | model=%s | "
+                    "reason=invalid_output | "
+                    "error=%s | "
+                    "falling_back_to=%s",
+                    settings.openrouter_free_model,
+                    exc,
+                    settings.openrouter_paid_model,
+                )
 
         else:
 
-            if not _free_error_allows_paid_fallback(
+            error_message = (
+                _extract_error(
+                    free_response
+                )
+            )
+
+            if _free_error_allows_paid_fallback(
                 free_response
             ):
 
+                logger.warning(
+                    "AI free failed | model=%s | "
+                    "status=%s | error=%s | "
+                    "falling_back_to=%s",
+                    settings.openrouter_free_model,
+                    free_response.status_code,
+                    error_message,
+                    settings.openrouter_paid_model,
+                )
+
+            else:
+
                 raise RuntimeError(
                     "OpenRouter free request failed: "
-                    + _extract_error(
-                        free_response
-                    )
+                    + error_message
                 )
 
     # ========================================================
     # PAID FALLBACK — THIS JOB ONLY
     # ========================================================
-
+    logger.info(
+        "AI paid fallback | model=%s",
+        settings.openrouter_paid_model,
+    )
     try:
         paid_response = _request_openrouter(
         model=settings.openrouter_paid_model,
@@ -485,10 +541,20 @@ def classify_job(
             )
         )
 
-    return _parse_response(
+    paid_result = _parse_response(
         paid_response,
         model_class=model_class,
         fallback_model=(
             settings.openrouter_paid_model
         ),
     )
+
+    logger.info(
+        "AI paid success | "
+        "requested_model=%s | "
+        "actual_model=%s",
+        settings.openrouter_paid_model,
+        paid_result.usage.model,
+    )
+
+    return paid_result
