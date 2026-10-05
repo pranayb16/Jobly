@@ -1,9 +1,9 @@
 import Link from 'next/link';
 import { ArrowRight, Building2, DatabaseZap, LineChart, Sparkles } from 'lucide-react';
 import { Metric, Ranking } from '@/components/IntelligenceUI';
-import { CompanySnapshot, Trends, formatNumber, getIntelligence } from '@/lib/intelligence';
+import { CompanyHiringStats, Trends, formatGrowth, formatNumber, getIntelligence } from '@/lib/intelligence';
 
-type CompaniesPayload = { companies: CompanySnapshot[] };
+type CompaniesPayload = { companies: CompanyHiringStats[] };
 
 export default async function HomePage() {
   const [trends, companiesPayload] = await Promise.all([
@@ -20,6 +20,6 @@ export default async function HomePage() {
 
     <section className="shell intel-split">{trends?.top_roles ? <Ranking title="Top roles" items={trends.top_roles} basePath="/roles" /> : <div className="coverage-card"><Sparkles size={20} /><h2>Role intelligence is building</h2><p>AI-derived rankings appear once enrichment coverage reaches the publication threshold.</p></div>}{trends?.top_skills ? <Ranking title="Top skills" items={trends.top_skills} basePath="/skills" /> : <div className="coverage-card"><LineChart size={20} /><h2>Skill intelligence is building</h2><p>Deterministic totals remain available while semantic coverage catches up.</p></div>}</section>
 
-    <section className="shell company-preview"><div className="section-title"><div><span>COMPANY PULSE</span><h2>Largest active hiring footprints</h2></div><Link href="/companies">All companies <ArrowRight size={14} /></Link></div><div className="company-grid">{companies.map((company) => <Link href={`/companies/${company.slug}`} key={company.id}><Building2 size={18} /><strong>{company.name}</strong><span>{formatNumber(company.total_open_jobs)} openings</span><small>+{company.new_jobs ?? 0} / −{company.removed_jobs ?? 0} today</small></Link>)}{companies.length === 0 && <p className="inline-empty">No company snapshots yet.</p>}</div></section>
+    <section className="shell company-preview"><div className="section-title"><div><span>COMPANY PULSE</span><h2>Recent hiring activity</h2></div><Link href="/companies">All companies <ArrowRight size={14} /></Link></div><div className="company-grid">{companies.map((company) => <Link href={`/companies/${company.slug}`} key={company.id}><Building2 size={18} /><strong>{company.name}</strong><span>{formatNumber(company.current_open_jobs)} openings</span><small>{formatNumber(company.posted_today)} today · {formatNumber(company.posted_last_7_days)} last 7d · {formatGrowth(company.weekly_growth_percent)}</small></Link>)}{companies.length === 0 && <p className="inline-empty">No publishable company statistics yet.</p>}</div></section>
   </div>;
 }

@@ -1,6 +1,7 @@
 'use client';
 
 import { Database, Search } from 'lucide-react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useEffect, useMemo, useState } from 'react';
 import type { Job } from '@/src/types';
 import { ActiveFilters } from './jobs/ActiveFilters';
@@ -42,6 +43,7 @@ const experienceMatch = (job: Job, value: string) => {
 };
 
 export default function JobsPage() {
+  const reduceMotion = useReducedMotion();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [filters, setFilters] = useState<Filters>(defaults);
   const [query, setQuery] = useState('');
@@ -200,14 +202,14 @@ export default function JobsPage() {
   const selected = detailJob || jobs.find((job) => String(job.id) === selectedId) || null;
   const companies = new Set(visible.map((job) => job.company)).size;
 
-  return <section className="jobs-page-v2"><JobSearchBar query={queryDraft} location={locationDraft} onQuery={setQueryDraft} onLocation={setLocationDraft} onSearch={() => { setQuery(queryDraft.trim()); setLocationQuery(locationDraft.trim()); }} />
+  return <motion.section className="jobs-page-v2" initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: .4 }}><JobSearchBar query={queryDraft} location={locationDraft} onQuery={setQueryDraft} onLocation={setLocationDraft} onSearch={() => { setQuery(queryDraft.trim()); setLocationQuery(locationDraft.trim()); }} />
     <main className="shell jobs-results-shell-v3"><JobsToolbar jobs={visible.length} companies={companies} sort={sort} filterCount={filterCount} onSort={setSort} onFilters={() => setMobileFilters(true)} />
       <JobFilterToolbar definitions={definitions} filters={filters} savedOnly={savedOnly} onToggle={toggleFilter} onClearCategory={clearCategory} onSaved={setSavedOnly} />
       <ActiveFilters groups={activeGroups} onRemove={(key, value) => key === 'saved' ? setSavedOnly(false) : toggleFilter(key, value)} onClearAll={clearFilters} />
       {status === 'loading' && <div className="jobs-grid-v2 skeleton-grid-v2">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
       {status === 'error' && <div className="jobs-state-v2"><Database size={26} /><h2>The job index is unavailable</h2><p>{error}</p><button onClick={() => window.location.reload()}>Try again</button></div>}
       {status === 'ready' && visible.length === 0 && <div className="jobs-state-v2"><Search size={26} /><h2>No jobs match these filters</h2><p>Try removing a filter or broadening your search.</p><button onClick={clearEverything}>Clear search and filters</button></div>}
-      {status === 'ready' && visible.length > 0 && <div className="jobs-grid-v2">{pagedJobs.map((job) => <JobCard key={job.id} job={job} selected={String(job.id) === selectedId} saved={saved.has(String(job.id))} onSelect={() => setSelectedId(String(job.id))} onSave={() => toggleState('saved', String(job.id))} onHide={() => toggleState('hidden', String(job.id))} />)}</div>}
+      {status === 'ready' && visible.length > 0 && <motion.div className="jobs-grid-v2" layout={!reduceMotion}>{pagedJobs.map((job, index) => <JobCard key={job.id} index={index} job={job} selected={String(job.id) === selectedId} saved={saved.has(String(job.id))} onSelect={() => setSelectedId(String(job.id))} onSave={() => toggleState('saved', String(job.id))} onHide={() => toggleState('hidden', String(job.id))} />)}</motion.div>}
       {status === 'ready' && visible.length > 0 && pageCount > 1 && <nav className="pagination-v2" aria-label="Job results pages">
         <button className="pagination-boundary-v2" disabled={page === 1} onClick={() => goToPage(1)}>First</button>
         <div className="pagination-pages-v2">
@@ -218,6 +220,6 @@ export default function JobsPage() {
       </nav>}
     </main>
     {mobileFilters && <MobileFilterDrawer definitions={definitions} filters={filters} savedOnly={savedOnly} count={filterCount} onToggle={toggleFilter} onClearCategory={clearCategory} onSaved={setSavedOnly} onClearAll={clearFilters} onClose={() => setMobileFilters(false)} />}
-    {selected && <JobDetail job={selected} saved={saved.has(String(selected.id))} applied={applied.has(String(selected.id))} onSave={() => toggleState('saved', String(selected.id))} onApplied={() => { if (!applied.has(String(selected.id))) toggleState('applied', String(selected.id)); }} onClose={() => setSelectedId('')} />}
-  </section>;
+    <AnimatePresence>{selected && <JobDetail job={selected} saved={saved.has(String(selected.id))} applied={applied.has(String(selected.id))} onSave={() => toggleState('saved', String(selected.id))} onApplied={() => { if (!applied.has(String(selected.id))) toggleState('applied', String(selected.id)); }} onClose={() => setSelectedId('')} />}</AnimatePresence>
+  </motion.section>;
 }

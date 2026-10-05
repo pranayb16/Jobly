@@ -49,8 +49,30 @@ from jobly.enrichment.schemas_v3 import (
 
 from jobly.market.us_scope import classify_us_job
 
+from jobly.observability.repository import (
+    record_event,
+)
 
+from jobly.logging_config import (
+    configure_logging,
+    enable_pipeline_database_logging,
+)
 
+from jobly.observability.context import (
+    set_pipeline_run_id,
+    set_pipeline_stage,
+)
+
+from jobly.observability.repository import (
+    start_stage,
+    finish_stage,
+)
+
+from jobly.pipeline.repository import (
+    create_pipeline_run,
+    ensure_pipeline_run_table,
+    finish_pipeline_run,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -3556,68 +3578,282 @@ def run_enrichment(
 
 
 
-
 def main() -> None:
 
     parser = argparse.ArgumentParser(
-
         description=(
-
-            "Process the priority enrichment queue."
-
+            "Process the priority enrichment queue "
+            "with pipeline observability."
         )
-
     )
-
-
 
     parser.add_argument(
-
         "--limit",
-
         type=int,
-
         default=(
-
             get_settings()
-
             .ai_enrichment_limit
-
         ),
-
     )
-
-
 
     args = parser.parse_args()
 
+    if args.limit < 1:
+        parser.error(
+            "--limit must be at least 1"
+        )
 
+    # --------------------------------------------------------
+    # LOGGING
+    # --------------------------------------------------------
 
-    summary = run_enrichment(
+    configure_logging()
 
-        args.limit
+    # --------------------------------------------------------
+    # CREATE OBSERVABLE RUN
+    #
+    # This creates a pipeline_runs row even though this command
+    # is running only the enrichment stage.
+    # --------------------------------------------------------
 
+    with get_connection() as conn:
+
+        ensure_pipeline_run_table(
+            conn
+        )
+
+        pipeline_run_id = (
+            create_pipeline_run(
+                conn,
+                source_target=0,
+            )
+        )
+
+    set_pipeline_run_id(
+        pipeline_run_id
     )
 
-
-
-    print(
-        "Enrichment complete | "
-        f"processed={summary.processed} | "
-        f"ai_calls={summary.ai_calls} | "
-        f"completed={summary.completed} | "
-        f"failed={summary.failed} | "
-        f"stale={summary.stale} | "
-        f"skipped_non_us={summary.skipped_non_us} | "
-        f"backlog={summary.backlog} | "
-        f"input_tokens={summary.input_tokens} | "
-        f"output_tokens={summary.output_tokens} | "
-        f"thought_tokens={summary.thought_tokens} | "
-        f"cached_tokens={summary.cached_tokens} | "
-        f"total_tokens={summary.total_tokens}"
+    set_pipeline_stage(
+        "enrichment"
     )
+
+    enable_pipeline_database_logging()
+
+    start_stage(
+        pipeline_run_id,
+        "enrichment",
+    )
+
+    metrics: dict[str, int] = {}
+
+    try:
+
+        logger.info(
+            "standalone_enrichment_started "
+            "pipeline_run_id=%s "
+            "limit=%s",
+            pipeline_run_id,
+            args.limit,
+        )
+
+        summary = run_enrichment(
+            args.limit,
+            pipeline_run_id=(
+                pipeline_run_id
+            ),
+        )
+
+        metrics = {
+            "enrichments_processed":
+                summary.processed,
+
+            "enrichments_completed":
+                summary.completed,
+
+            "enrichments_failed":
+                summary.failed,
+
+            "enrichment_backlog":
+                summary.backlog,
+        }
+
+        stage_status = (
+            "partial_success"
+            if summary.failed > 0
+            else "success"
+        )
+
+        finish_stage(
+            pipeline_run_id,
+            "enrichment",
+            status=stage_status,
+            metrics={
+                "processed":
+                    summary.processed,
+
+                "ai_calls":
+                    summary.ai_calls,
+
+                "completed":
+                    summary.completed,
+
+                "failed":
+                    summary.failed,
+
+                "stale":
+                    summary.stale,
+
+                "skipped_non_us":
+                    summary.skipped_non_us,
+
+                "backlog":
+                    summary.backlog,
+
+                "input_tokens":
+                    summary.input_tokens,
+
+                "output_tokens":
+                    summary.output_tokens,
+
+                "thought_tokens":
+                    summary.thought_tokens,
+
+                "cached_tokens":
+                    summary.cached_tokens,
+
+                "total_tokens":
+                    summary.total_tokens,
+
+                "model_counts":
+                    summary.model_counts,
+            },
+        )
+
+        with get_connection() as conn:
+
+            finish_pipeline_run(
+                conn,
+                pipeline_run_id,
+                stage_status,
+                metrics,
+            )
+
+        logger.info(
+            "standalone_enrichment_complete "
+            "pipeline_run_id=%s "
+            "processed=%s "
+            "ai_calls=%s "
+            "completed=%s "
+            "failed=%s "
+            "backlog=%s",
+            pipeline_run_id,
+            summary.processed,
+            summary.ai_calls,
+            summary.completed,
+            summary.failed,
+            summary.backlog,
+        )
+
+        print(
+            "Enrichment complete | "
+            f"pipeline_run_id="
+            f"{pipeline_run_id} | "
+            f"processed="
+            f"{summary.processed} | "
+            f"ai_calls="
+            f"{summary.ai_calls} | "
+            f"completed="
+            f"{summary.completed} | "
+            f"failed="
+            f"{summary.failed} | "
+            f"stale="
+            f"{summary.stale} | "
+            f"skipped_non_us="
+            f"{summary.skipped_non_us} | "
+            f"backlog="
+            f"{summary.backlog} | "
+            f"input_tokens="
+            f"{summary.input_tokens} | "
+            f"output_tokens="
+            f"{summary.output_tokens} | "
+            f"thought_tokens="
+            f"{summary.thought_tokens} | "
+            f"cached_tokens="
+            f"{summary.cached_tokens} | "
+            f"total_tokens="
+            f"{summary.total_tokens}"
+        )
+
+    except KeyboardInterrupt:
+
+        logger.warning(
+            "standalone_enrichment_cancelled "
+            "pipeline_run_id=%s",
+            pipeline_run_id,
+        )
+
+        finish_stage(
+            pipeline_run_id,
+            "enrichment",
+            status="failed",
+            error=(
+                "Enrichment manually stopped"
+            ),
+        )
+
+        with get_connection() as conn:
+
+            finish_pipeline_run(
+                conn,
+                pipeline_run_id,
+                "failed",
+                metrics,
+                "Enrichment manually stopped",
+            )
+
+        print(
+            "\nEnrichment manually stopped | "
+            f"pipeline_run_id="
+            f"{pipeline_run_id}"
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "standalone_enrichment_failed "
+            "pipeline_run_id=%s",
+            pipeline_run_id,
+        )
+
+        finish_stage(
+            pipeline_run_id,
+            "enrichment",
+            status="failed",
+            error=str(exc),
+        )
+
+        with get_connection() as conn:
+
+            finish_pipeline_run(
+                conn,
+                pipeline_run_id,
+                "failed",
+                metrics,
+                str(exc),
+            )
+
+        raise
+
+    finally:
+
+        set_pipeline_stage(
+            None
+        )
+
+        set_pipeline_run_id(
+            None
+        )
 
 
 if __name__ == "__main__":
-
     main()

@@ -5,25 +5,16 @@ from datetime import timedelta
 from fastapi import APIRouter, HTTPException, Query
 
 from jobly.db.pool import get_pool
-from jobly.intelligence import MIN_AI_COVERAGE
-from jobly.intelligence.repository import company_history, get_company, list_companies
+from jobly.intelligence.repository import (
+    company_history,
+    get_company,
+    get_company_hiring_stats,
+    list_companies,
+)
 from jobly.intelligence.trends import change_between
 
 
 router = APIRouter(prefix="/api/companies", tags=["companies"])
-
-
-def _safe_snapshot(row: dict) -> dict:
-    result = dict(row)
-    coverage = float(result.get("enrichment_coverage") or 0)
-    result["ai_aggregates_available"] = coverage >= MIN_AI_COVERAGE
-    if coverage < MIN_AI_COVERAGE:
-        for key in (
-            "role_counts", "skill_counts", "seniority_counts", "location_counts",
-            "workplace_counts", "domain_counts",
-        ):
-            result[key] = None
-    return result
 
 
 def _trend_payload(history: list[dict]) -> dict:
@@ -49,16 +40,16 @@ def companies(
     with get_pool().connection() as conn:
         total, rows = list_companies(conn, limit=limit, offset=offset)
     return {"count": total, "limit": limit, "offset": offset,
-            "companies": [_safe_snapshot(row) for row in rows]}
+            "companies": rows}
 
 
 @router.get("/{slug}")
 def company(slug: str) -> dict:
     with get_pool().connection() as conn:
-        row = get_company(conn, slug)
+        row = get_company_hiring_stats(conn, slug)
     if row is None:
         raise HTTPException(status_code=404, detail="Company not found")
-    return _safe_snapshot(row)
+    return row
 
 
 @router.get("/{slug}/trends")

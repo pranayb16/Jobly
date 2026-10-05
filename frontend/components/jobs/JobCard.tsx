@@ -1,4 +1,5 @@
 import { Bookmark, EyeOff, ExternalLink } from 'lucide-react';
+import { motion, useReducedMotion } from 'motion/react';
 import type { Job } from '@/src/types';
 import { ago, companyMark, exact, label } from './helpers';
 
@@ -26,7 +27,8 @@ function formatSalary(job: Job) {
   return `Up to ${amount(job.salaryMax as number)}`;
 }
 
-export function JobCard({ job, selected, saved, onSelect, onSave, onHide }: { job: Job; selected: boolean; saved: boolean; onSelect: () => void; onSave: () => void; onHide: () => void }) {
+export function JobCard({ job, selected, saved, index, onSelect, onSave, onHide }: { job: Job; selected: boolean; saved: boolean; index: number; onSelect: () => void; onSave: () => void; onHide: () => void }) {
+  const reduceMotion = useReducedMotion();
   const applyUrl = usableApplyUrl(job.applyUrl);
   const salary = formatSalary(job);
   const metadata = [job.workplaceType, job.employmentType, job.seniority].filter(Boolean).slice(0, 3);
@@ -34,7 +36,7 @@ export function JobCard({ job, selected, saved, onSelect, onSave, onHide }: { jo
   const remainingSkills = Math.max(0, job.skills.length - visibleSkills.length);
   const jobLabel = `${job.title} at ${job.company}`;
 
-  return <article className={`${selected ? 'job-card-v2 selected' : 'job-card-v2'} ${cardTone(job)}`} onClick={onSelect} role="button" aria-label={`View details for ${jobLabel}`} tabIndex={0} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onSelect(); } }}>
+  return <motion.article layout={!reduceMotion} initial={reduceMotion ? false : { opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .32, delay: reduceMotion ? 0 : Math.min(index * .035, .24) }} className={`${selected ? 'job-card-v2 selected' : 'job-card-v2'} ${cardTone(job)}`} onClick={onSelect} role="button" aria-label={`View details for ${jobLabel}`} tabIndex={0} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onSelect(); } }}>
     <div className="job-card-main-v3">
       <div className="job-card-top-v3"><time title={exact(job.createdAt)}><i />{ago(job.createdAt)}</time><div className="job-card-utilities-v3"><button type="button" title={saved ? 'Remove from saved jobs' : 'Save job'} aria-label={`${saved ? 'Unsave' : 'Save'} ${jobLabel}`} className={saved ? 'saved' : ''} onClick={(event) => { event.stopPropagation(); onSave(); }}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} /></button><button type="button" title="Hide job" aria-label={`Hide ${jobLabel}`} onClick={(event) => { event.stopPropagation(); onHide(); }}><EyeOff size={15} /></button></div></div>
       <strong className="job-card-company-v4">{job.company}</strong>
@@ -46,5 +48,5 @@ export function JobCard({ job, selected, saved, onSelect, onSave, onHide }: { jo
       <div className="job-card-facts-v3">{salary && <strong>{salary}</strong>}<span>{job.location || 'Location flexible'} <small>· via {label(job.provider || 'Company')}</small></span></div>
       <div className="job-card-cta-v4">{applyUrl ? <a href={applyUrl} target="_blank" rel="noopener noreferrer" aria-label={`Apply to ${jobLabel}`} onClick={(event) => event.stopPropagation()}>Apply <ExternalLink size={13} /></a> : <button type="button" aria-label={`View details for ${jobLabel}`} onClick={(event) => { event.stopPropagation(); onSelect(); }}>View details</button>}</div>
     </footer>
-  </article>;
+  </motion.article>;
 }

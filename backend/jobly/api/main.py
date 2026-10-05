@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from jobly.api.routes.admin_runs import router as admin_runs_router
 from jobly.api.routes.companies import router as companies_router
 from jobly.api.routes.health import router as health_router
 from jobly.api.routes.roles import router as roles_router
@@ -35,6 +36,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(jobs_router)
 app.include_router(companies_router)
+app.include_router(admin_runs_router)
 app.include_router(trends_router)
 app.include_router(roles_router)
 app.include_router(skills_router)

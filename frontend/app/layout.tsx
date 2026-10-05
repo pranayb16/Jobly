@@ -16,8 +16,9 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" data-scroll-behavior="smooth">
       <body>
         <div className="app-shell">
+          <div className="site-ambient" aria-hidden="true"><i /><i /><i /><i /></div>
           <Header />
-          <main>{children}</main>
+          <main className="site-main">{children}</main>
           <footer className="site-footer">
             <div className="shell footer-inner">
               <Link className="brand footer-brand" href="/">

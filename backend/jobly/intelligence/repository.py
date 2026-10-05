@@ -7,27 +7,96 @@ from psycopg.rows import dict_row
 
 def list_companies(conn, *, limit: int, offset: int) -> tuple[int, list[dict]]:
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT COUNT(*) AS count FROM companies")
+        cur.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM companies AS c
+            JOIN company_hiring_stats AS h
+              ON h.company_id = c.id
+            WHERE h.is_publishable = TRUE
+            """
+        )
         total = cur.fetchone()["count"]
         cur.execute(
             """
             SELECT c.id, c.name, c.slug, c.website_domain,
-                   s.snapshot_date, s.total_open_jobs, s.new_jobs, s.removed_jobs,
-                   s.changed_jobs, s.enriched_jobs, s.enrichment_coverage,
-                   s.role_counts, s.skill_counts, s.seniority_counts,
-                   s.location_counts, s.workplace_counts, s.domain_counts
+                   h.current_open_jobs,
+                   h.total_jobs_seen,
+                   h.jobs_with_posted_at,
+                   h.jobs_without_posted_at,
+                   h.posted_at_coverage::double precision AS posted_at_coverage,
+                   h.posted_today,
+                   h.posted_yesterday,
+                   h.daily_change,
+                   h.posted_last_7_days,
+                   h.posted_previous_7_days,
+                   h.weekly_change,
+                   h.weekly_growth_percent::double precision AS weekly_growth_percent,
+                   h.posted_last_15_days,
+                   h.active_from_last_15_days,
+                   h.removed_from_last_15_days,
+                   h.active_30_plus_days,
+                   h.active_45_plus_days,
+                   h.active_90_plus_days,
+                   h.latest_posted_at,
+                   h.oldest_posted_at,
+                   h.oldest_active_posted_at,
+                   h.is_publishable,
+                   h.publishable_reason,
+                   h.calculated_at
             FROM companies AS c
-            LEFT JOIN LATERAL (
-                SELECT * FROM company_daily_snapshots
-                WHERE company_id = c.id ORDER BY snapshot_date DESC LIMIT 1
-            ) AS s ON TRUE
-            ORDER BY COALESCE(s.total_open_jobs, 0) DESC, c.name
+            JOIN company_hiring_stats AS h
+              ON h.company_id = c.id
+            WHERE h.is_publishable = TRUE
+            ORDER BY h.posted_last_7_days DESC,
+                     h.current_open_jobs DESC,
+                     c.name
             LIMIT %s OFFSET %s
             """,
             (limit, offset),
         )
         rows = list(cur.fetchall())
     return total, rows
+
+
+def get_company_hiring_stats(conn, slug: str) -> dict | None:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.name, c.slug, c.website_domain,
+                   h.current_open_jobs,
+                   h.total_jobs_seen,
+                   h.jobs_with_posted_at,
+                   h.jobs_without_posted_at,
+                   h.posted_at_coverage::double precision AS posted_at_coverage,
+                   h.posted_today,
+                   h.posted_yesterday,
+                   h.daily_change,
+                   h.posted_last_7_days,
+                   h.posted_previous_7_days,
+                   h.weekly_change,
+                   h.weekly_growth_percent::double precision AS weekly_growth_percent,
+                   h.posted_last_15_days,
+                   h.active_from_last_15_days,
+                   h.removed_from_last_15_days,
+                   h.active_30_plus_days,
+                   h.active_45_plus_days,
+                   h.active_90_plus_days,
+                   h.latest_posted_at,
+                   h.oldest_posted_at,
+                   h.oldest_active_posted_at,
+                   h.is_publishable,
+                   h.publishable_reason,
+                   h.calculated_at
+            FROM companies AS c
+            JOIN company_hiring_stats AS h
+              ON h.company_id = c.id
+            WHERE c.slug = %s
+              AND h.is_publishable = TRUE
+            """,
+            (slug,),
+        )
+        return cur.fetchone()
 
 
 def get_company(conn, slug: str) -> dict | None:

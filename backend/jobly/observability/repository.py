@@ -89,7 +89,9 @@ def finish_stage(
                 """,
                 (
                     status,
-                    Jsonb(metrics or {}),
+                    Jsonb(
+                        metrics or {}
+                    ),
                     (
                         error[:4000]
                         if error
@@ -120,7 +122,6 @@ def record_event(
 
     if pipeline_run_id is None:
         return
-
 
     try:
 
@@ -178,6 +179,7 @@ def record_event(
                         model,
 
                         message[:4000],
+
                         Jsonb(
                             details or {}
                         ),
@@ -187,6 +189,6 @@ def record_event(
             conn.commit()
 
     except Exception:
-        # Observability must never take down
+        # Observability must never crash
         # the actual pipeline.
         return

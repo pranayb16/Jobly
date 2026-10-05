@@ -20,6 +20,37 @@ router = APIRouter(
 )
 
 
+STRING_LIST_FIELDS = (
+    "related_roles",
+    "role_keywords",
+    "responsibility_tags",
+    "skills",
+    "required_skills",
+    "preferred_skills",
+    "soft_skills",
+    "education_fields",
+    "certifications",
+)
+
+
+def _normalize_canonical_row(row: dict) -> dict:
+    """Keep legacy JSON objects/nulls from breaking the typed jobs response."""
+    result = dict(row)
+
+    for field in STRING_LIST_FIELDS:
+        value = result.get(field)
+        if isinstance(value, dict):
+            result[field] = list(value)
+        elif not isinstance(value, list):
+            result[field] = []
+
+    for field in ("locations", "preferred_locations", "ai_locations"):
+        if not isinstance(result.get(field), list):
+            result[field] = []
+
+    return result
+
+
 CANONICAL_SELECT = """
     cji.*,
 
@@ -115,7 +146,7 @@ def get_jobs(
         offset=offset,
         jobs=[
             JobListItem(
-                **row
+                **_normalize_canonical_row(row)
             )
             for row in rows
         ],
@@ -165,5 +196,5 @@ def get_job(
         )
 
     return JobDetail(
-        **row
+        **_normalize_canonical_row(row)
     )

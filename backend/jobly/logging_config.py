@@ -12,7 +12,6 @@ def configure_logging() -> None:
 
     settings = get_settings()
 
-
     logging.basicConfig(
         level=getattr(
             logging,
@@ -36,11 +35,7 @@ def enable_pipeline_database_logging() -> None:
         PipelineDatabaseLogHandler,
     )
 
-
     root = logging.getLogger()
-
-
-    # Prevent duplicate handlers if called twice.
 
     if any(
         isinstance(
@@ -51,16 +46,13 @@ def enable_pipeline_database_logging() -> None:
     ):
         return
 
-
     handler = (
         PipelineDatabaseLogHandler()
     )
 
-
     handler.setLevel(
         logging.INFO
     )
-
 
     root.addHandler(
         handler

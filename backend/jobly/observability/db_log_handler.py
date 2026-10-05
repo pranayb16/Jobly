@@ -27,10 +27,8 @@ class PipelineDatabaseLogHandler(
             get_pipeline_run_id()
         )
 
-
         if pipeline_run_id is None:
             return
-
 
         try:
 
@@ -38,9 +36,7 @@ class PipelineDatabaseLogHandler(
                 record.getMessage()
             )
 
-
             exception_text = None
-
 
             if record.exc_info:
 
@@ -49,7 +45,6 @@ class PipelineDatabaseLogHandler(
                         *record.exc_info
                     )
                 )
-
 
             with get_connection() as conn:
 
@@ -98,13 +93,13 @@ class PipelineDatabaseLogHandler(
 
                 conn.commit()
 
-
         except Exception as exc:
 
-            # Never log this through logging itself,
-            # otherwise we could recurse forever.
+            # Never use logging here.
+            # Doing so could recursively call this handler.
 
             try:
+
                 sys.stderr.write(
                     "Pipeline DB log handler "
                     f"failed: {exc}\n"
