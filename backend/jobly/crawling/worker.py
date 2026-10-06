@@ -5,10 +5,12 @@ from dataclasses import dataclass
 
 from jobly.config import get_settings
 from jobly.crawling.repository import (
+    acquire_source_lock,
     create_crawl_run,
     mark_crawl_failed,
     mark_crawl_success,
     select_active_sources,
+    release_source_lock,
 )
 from jobly.crawling.runner import crawl_source
 from jobly.db.connection import get_connection
@@ -57,6 +59,13 @@ def run_crawl(
         for source in sources:
             crawl_run_id = None
             logger.info("source_start source_id=%s provider=%s", source.id, source.provider)
+            if not acquire_source_lock(conn, source.id):
+                logger.info(
+                    "source_skipped_locked source_id=%s provider=%s",
+                    source.id,
+                    source.provider,
+                )
+                continue
             try:
                 crawl_run_id, crawl_started_at = create_crawl_run(
                     conn, source.id, pipeline_run_id
@@ -79,6 +88,8 @@ def run_crawl(
                             crawl_started_at,
                             job,
                             pipeline_run_id,
+                            source_company_id=source.company_id,
+                            source_company_name=source.company_name,
                         )
                         jobs_new += int(result.created and not result.baseline)
                         jobs_changed += int(result.changed)
@@ -141,6 +152,8 @@ def run_crawl(
                     source.provider,
                     crawl_run_id,
                 )
+            finally:
+                release_source_lock(conn, source.id)
 
     summary = CrawlSummary(
         source_count=len(sources),

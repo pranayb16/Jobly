@@ -22,9 +22,10 @@ function formatSalary(job: Job) {
   if (job.salaryMin === null && job.salaryMax === null) return '';
   const symbol = ({ USD: '$', EUR: '€', GBP: '£', CAD: 'CA$', AUD: 'A$' } as Record<string, string>)[job.salaryCurrency?.toUpperCase()] || `${job.salaryCurrency || ''} `;
   const amount = (value: number) => `${symbol}${new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: value >= 1000 ? 0 : 1 }).format(value)}`;
-  if (job.salaryMin !== null && job.salaryMax !== null) return `${amount(job.salaryMin)}–${amount(job.salaryMax)}`;
-  if (job.salaryMin !== null) return `From ${amount(job.salaryMin)}`;
-  return `Up to ${amount(job.salaryMax as number)}`;
+  const period = job.salaryPeriod ? ` / ${label(job.salaryPeriod)}` : '';
+  if (job.salaryMin !== null && job.salaryMax !== null) return `${amount(job.salaryMin)}–${amount(job.salaryMax)}${period}`;
+  if (job.salaryMin !== null) return `From ${amount(job.salaryMin)}${period}`;
+  return `Up to ${amount(job.salaryMax as number)}${period}`;
 }
 
 export function JobCard({ job, selected, saved, index, onSelect, onSave, onHide }: { job: Job; selected: boolean; saved: boolean; index: number; onSelect: () => void; onSave: () => void; onHide: () => void }) {
@@ -38,7 +39,7 @@ export function JobCard({ job, selected, saved, index, onSelect, onSave, onHide 
 
   return <motion.article layout={!reduceMotion} initial={reduceMotion ? false : { opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .32, delay: reduceMotion ? 0 : Math.min(index * .035, .24) }} className={`${selected ? 'job-card-v2 selected' : 'job-card-v2'} ${cardTone(job)}`} onClick={onSelect} role="button" aria-label={`View details for ${jobLabel}`} tabIndex={0} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onSelect(); } }}>
     <div className="job-card-main-v3">
-      <div className="job-card-top-v3"><time title={exact(job.createdAt)}><i />{ago(job.createdAt)}</time><div className="job-card-utilities-v3"><button type="button" title={saved ? 'Remove from saved jobs' : 'Save job'} aria-label={`${saved ? 'Unsave' : 'Save'} ${jobLabel}`} className={saved ? 'saved' : ''} onClick={(event) => { event.stopPropagation(); onSave(); }}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} /></button><button type="button" title="Hide job" aria-label={`Hide ${jobLabel}`} onClick={(event) => { event.stopPropagation(); onHide(); }}><EyeOff size={15} /></button></div></div>
+      <div className="job-card-top-v3"><time title={exact(job.createdAt)}><i />{job.dateSource === 'observed' ? 'First observed ' : ''}{ago(job.createdAt)}</time><div className="job-card-utilities-v3"><button type="button" title={saved ? 'Remove from saved jobs' : 'Save job'} aria-label={`${saved ? 'Unsave' : 'Save'} ${jobLabel}`} className={saved ? 'saved' : ''} onClick={(event) => { event.stopPropagation(); onSave(); }}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} /></button><button type="button" title="Hide job" aria-label={`Hide ${jobLabel}`} onClick={(event) => { event.stopPropagation(); onHide(); }}><EyeOff size={15} /></button></div></div>
       <strong className="job-card-company-v4">{job.company}</strong>
       <div className="job-card-title-row-v4"><h2>{job.title}</h2><div className="company-avatar-v2 compact" style={companyMark(job.company)} aria-hidden="true">{job.company.slice(0, 1).toUpperCase()}</div></div>
       {metadata.length > 0 && <div className="job-meta-v3">{metadata.map((value) => <span key={value}>{label(value)}</span>)}</div>}

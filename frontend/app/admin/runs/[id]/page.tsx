@@ -4,6 +4,7 @@ import { CollapsibleSection } from '@/components/admin/CollapsibleSection';
 import { CrawlTable } from '@/components/admin/CrawlTable';
 import { LogViewer } from '@/components/admin/LogViewer';
 import { KeyValueRows, MetricStrip, StatusBadge } from '@/components/admin/AdminPrimitives';
+import { AdminDetailFrame, AdminViewTransition } from '@/components/admin/AdminMotion';
 import { RunTabs, type RunView } from '@/components/admin/RunTabs';
 import {
   formatAdminDate,
@@ -110,7 +111,7 @@ export default async function AdminRunPage({ params, searchParams }: { params: P
   const previousOffset = Math.max(0, logOffset - logLimit);
   const nextOffset = logOffset + logLimit;
 
-  return <div className="admin-cosmic-shell"><div className="intelligence-ambient" aria-hidden="true"><i /><i /><i /></div><div className="shell admin-page admin-run-detail">
+  return <div className="admin-cosmic-shell"><div className="intelligence-ambient" aria-hidden="true"><i /><i /><i /></div><AdminDetailFrame>
     <Link className="admin-back" href="/admin/runs">← Pipeline runs</Link>
     <header className="admin-run-header">
       <div><span>PIPELINE EXECUTION</span><h1>Pipeline Run #{run.id}</h1><p>{formatAdminDate(run.started_at)}{run.finished_at ? ` · finished ${formatAdminDate(run.finished_at)}` : ' · still running'}</p></div>
@@ -126,7 +127,7 @@ export default async function AdminRunPage({ params, searchParams }: { params: P
     {run.error && <div className="admin-error-banner"><strong>Run error</strong><p>{run.error}</p></div>}
     <RunTabs runId={run.id} active={view} />
 
-    <main className="admin-tab-panel">
+    <AdminViewTransition view={view}>
       {view === 'overview' && <section>
         <PanelHeading eyebrow="AT A GLANCE" title="Run overview" copy="Summary first, with stage details available on demand." />
         <div className="admin-accordion-stack">
@@ -176,6 +177,6 @@ export default async function AdminRunPage({ params, searchParams }: { params: P
         {!logs ? <div className="admin-empty">Raw logs are unavailable.</div> : logs.logs.length ? <LogViewer logs={logs.logs} /> : <div className="admin-empty">No logs were recorded for this run.</div>}
         {logs && logs.count > logLimit && <nav className="admin-pagination" aria-label="Log pages">{logOffset > 0 ? <Link href={`/admin/runs/${run.id}?view=logs&log_offset=${previousOffset}`}>Newer logs</Link> : <span />}{nextOffset < logs.count ? <Link href={`/admin/runs/${run.id}?view=logs&log_offset=${nextOffset}`}>Older logs</Link> : <span />}</nav>}
       </section>}
-    </main>
-  </div></div>;
+    </AdminViewTransition>
+  </AdminDetailFrame></div>;
 }

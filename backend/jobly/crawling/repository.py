@@ -10,25 +10,52 @@ class CrawlSource:
     canonical_url: str
     last_success_at: object
     last_job_count: int | None
+    company_id: int | None
+    company_name: str | None
+
+
+CRAWL_SOURCE_LOCK_NAMESPACE = 170010001
+
+
+def acquire_source_lock(conn, source_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_try_advisory_lock(%s, %s)",
+            (CRAWL_SOURCE_LOCK_NAMESPACE, source_id),
+        )
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
+def release_source_lock(conn, source_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_unlock(%s, %s)",
+            (CRAWL_SOURCE_LOCK_NAMESPACE, source_id),
+        )
 
 
 def select_active_sources(cur, limit: int | None) -> list[CrawlSource]:
     if limit is None:
         cur.execute(
             """
-            SELECT id, provider, canonical_url, last_success_at, last_job_count
-            FROM sources
-            WHERE status = 'active'
-            ORDER BY id
+            SELECT s.id, s.provider, s.canonical_url, s.last_success_at,
+                   s.last_job_count, s.company_id, c.name
+            FROM sources AS s
+            LEFT JOIN companies AS c ON c.id = s.company_id
+            WHERE s.status = 'active'
+            ORDER BY s.id
             """
         )
     else:
         cur.execute(
             """
-            SELECT id, provider, canonical_url, last_success_at, last_job_count
-            FROM sources
-            WHERE status = 'active'
-            ORDER BY id
+            SELECT s.id, s.provider, s.canonical_url, s.last_success_at,
+                   s.last_job_count, s.company_id, c.name
+            FROM sources AS s
+            LEFT JOIN companies AS c ON c.id = s.company_id
+            WHERE s.status = 'active'
+            ORDER BY s.id
             LIMIT %s
             """,
             (limit,),
@@ -89,8 +116,16 @@ def mark_crawl_failed(conn, source_id: int, crawl_run_id: int, error: Exception)
         cur.execute(
             """
             UPDATE sources
-            SET last_attempt_at = NOW(), last_failure_at = NOW(),
-                consecutive_failures = consecutive_failures + 1, last_error = %s
+            SET
+                status = CASE
+                    WHEN consecutive_failures + 1 >= 3
+                        THEN 'inactive'
+                    ELSE status
+                END,
+                last_attempt_at = NOW(),
+                last_failure_at = NOW(),
+                consecutive_failures = consecutive_failures + 1,
+                last_error = %s
             WHERE id = %s
             """,
             (error_message, source_id),

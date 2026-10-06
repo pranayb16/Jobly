@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
 from jobly.companies.repository import ensure_company, link_source_company
+from jobly.config import get_settings
 from jobly.enrichment.input_builder import build_content_hash
 
 
@@ -20,6 +22,34 @@ class JobSaveResult:
     changed: bool = False
     reactivated: bool = False
     baseline: bool = False
+
+
+ENRICHMENT_WINDOW = timedelta(days=7)
+
+
+def determine_enrichment_eligibility(
+    posted_at: datetime | None,
+    *,
+    is_us_job: bool | None = None,
+    now: datetime | None = None,
+) -> tuple[str, str | None]:
+    if is_us_job is False:
+        return "not_eligible", "non_us"
+
+    if posted_at is None:
+        return "eligible", None
+
+    if posted_at.tzinfo is None:
+        posted_at = posted_at.replace(tzinfo=UTC)
+
+    current_time = now or datetime.now(UTC)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=UTC)
+
+    if posted_at < current_time - ENRICHMENT_WINDOW:
+        return "not_eligible", "older_than_7_days"
+
+    return "eligible", None
 
 
 def evaluate_mass_drop(
@@ -66,14 +96,17 @@ def enqueue_enrichment(
     *,
     reason: str,
     priority: int,
+    schema_version: str,
 ) -> None:
     cur.execute(
         """
-        INSERT INTO enrichment_queue (job_id, content_hash, priority, reason)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (job_id, content_hash) DO NOTHING
+        INSERT INTO enrichment_queue (
+            job_id, content_hash, schema_version, priority, reason
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (job_id, content_hash, schema_version) DO NOTHING
         """,
-        (job_id, content_hash, priority, reason),
+        (job_id, content_hash, schema_version, priority, reason),
     )
 
 
@@ -114,18 +147,33 @@ def save_job(
     crawl_started_at,
     job,
     pipeline_run_id: int | None = None,
+    *,
+    source_company_id: int | None = None,
+    source_company_name: str | None = None,
 ) -> JobSaveResult:
     content_hash = build_content_hash(job)
+    schema_version = get_settings().ai_classification_version
     is_baseline = previous_success_at is None
     observed_new_after = previous_success_at if job.posted_at is None else None
     observed_new_before = crawl_started_at if observed_new_after is not None else None
-    company_id = ensure_company(cur, job.company)
-    link_source_company(cur, source_id, company_id)
+    company_id = source_company_id or ensure_company(cur, job.company)
+    company_name = source_company_name or job.company
+    if source_company_id is None:
+        link_source_company(cur, source_id, company_id)
+    eligibility, eligibility_reason = determine_enrichment_eligibility(
+        job.posted_at
+    )
+    classification_status = (
+        "pending"
+        if eligibility == "eligible"
+        else "not_eligible"
+    )
 
     cur.execute(
         """
         SELECT id, content_hash, active, title, location, employment_type, workplace_type,
-               description_text, description_html, raw_payload, company_id
+               description_text, description_html, raw_payload, company_id,
+               posted_at, is_us_job
         FROM jobs
         WHERE source_id = %s AND external_job_id = %s
         FOR UPDATE
@@ -142,10 +190,11 @@ def save_job(
                 employment_type, workplace_type, posted_at, posted_at_source,
                 observed_new_after, observed_new_before, description_text,
                 description_html, job_url, apply_url, raw_payload, content_hash,
-                classification_status, last_seen_crawl_id
+                classification_status, enrichment_eligibility,
+                enrichment_eligibility_reason, last_seen_crawl_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             RETURNING id
             """,
@@ -154,7 +203,7 @@ def save_job(
                 company_id,
                 job.external_job_id,
                 job.provider,
-                job.company,
+                company_name,
                 job.title,
                 job.location,
                 job.employment_type,
@@ -169,6 +218,9 @@ def save_job(
                 job.apply_url,
                 Jsonb(job.raw),
                 content_hash,
+                classification_status,
+                eligibility,
+                eligibility_reason,
                 crawl_run_id,
             ),
         )
@@ -182,22 +234,25 @@ def save_job(
             metadata={"baseline": is_baseline},
         )
 
-        if is_baseline:
-            enqueue_enrichment(
-                cur,
-                job_id,
-                content_hash,
-                reason="bootstrap",
-                priority=3,
-            )
-        else:
-            enqueue_enrichment(
-                cur,
-                job_id,
-                content_hash,
-                reason="new_job",
-                priority=1,
-            )
+        if eligibility == "eligible":
+            if is_baseline:
+                enqueue_enrichment(
+                    cur,
+                    job_id,
+                    content_hash,
+                    reason="bootstrap",
+                    priority=3,
+                    schema_version=schema_version,
+                )
+            else:
+                enqueue_enrichment(
+                    cur,
+                    job_id,
+                    content_hash,
+                    reason="new_job",
+                    priority=1,
+                    schema_version=schema_version,
+                )
 
         return JobSaveResult(
             created=True,
@@ -216,8 +271,14 @@ def save_job(
         old_description_html,
         old_raw_payload,
         old_company_id,
+        old_posted_at,
+        is_us_job,
     ) = existing
     changed = old_hash != content_hash
+    eligibility, eligibility_reason = determine_enrichment_eligibility(
+        job.posted_at or old_posted_at,
+        is_us_job=is_us_job,
+    )
 
     if changed:
         if old_hash:
@@ -255,8 +316,12 @@ def save_job(
             description_text = %s, description_html = %s, job_url = %s, apply_url = %s,
             raw_payload = %s, content_hash = %s, last_seen_at = NOW(),
             last_seen_crawl_id = %s, removed_at = NULL, active = TRUE,
-            classification_status = CASE WHEN content_hash IS DISTINCT FROM %s
-                THEN 'pending' ELSE classification_status END,
+            enrichment_eligibility = %s,
+            enrichment_eligibility_reason = %s,
+            classification_status = CASE
+                WHEN %s = 'not_eligible' THEN 'not_eligible'
+                WHEN content_hash IS DISTINCT FROM %s THEN 'pending'
+                ELSE classification_status END,
             classification_started_at = CASE WHEN content_hash IS DISTINCT FROM %s
                 THEN NULL ELSE classification_started_at END,
             classification_attempts = CASE WHEN content_hash IS DISTINCT FROM %s
@@ -272,7 +337,7 @@ def save_job(
         (
             company_id or old_company_id,
             job.provider,
-            job.company,
+            company_name,
             job.title,
             job.location,
             job.employment_type,
@@ -288,6 +353,9 @@ def save_job(
             Jsonb(job.raw),
             content_hash,
             crawl_run_id,
+            eligibility,
+            eligibility_reason,
+            eligibility,
             content_hash,
             content_hash,
             content_hash,
@@ -298,8 +366,15 @@ def save_job(
         ),
     )
 
-    if changed:
-        enqueue_enrichment(cur, job_id, content_hash, reason="changed_job", priority=2)
+    if changed and eligibility == "eligible":
+        enqueue_enrichment(
+            cur,
+            job_id,
+            content_hash,
+            reason="changed_job",
+            priority=2,
+            schema_version=schema_version,
+        )
     if not was_active:
         _record_event(cur, job_id, "reactivated", crawl_run_id, pipeline_run_id)
     return JobSaveResult(changed=changed, reactivated=not was_active)

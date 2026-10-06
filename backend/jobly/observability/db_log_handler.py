@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import traceback
 
 from jobly.db.connection import (
@@ -17,6 +18,15 @@ from jobly.observability.context import (
 class PipelineDatabaseLogHandler(
     logging.Handler
 ):
+    def __init__(self) -> None:
+        super().__init__()
+        self._conn = None
+        self._lock = threading.Lock()
+
+    def _connection(self):
+        if self._conn is None or self._conn.closed:
+            self._conn = get_connection()
+        return self._conn
 
     def emit(
         self,
@@ -46,7 +56,8 @@ class PipelineDatabaseLogHandler(
                     )
                 )
 
-            with get_connection() as conn:
+            with self._lock:
+                conn = self._connection()
 
                 with conn.cursor() as cur:
 
@@ -94,6 +105,13 @@ class PipelineDatabaseLogHandler(
                 conn.commit()
 
         except Exception as exc:
+            if self._conn is not None:
+                try:
+                    self._conn.rollback()
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
             # Never use logging here.
             # Doing so could recursively call this handler.
@@ -107,3 +125,12 @@ class PipelineDatabaseLogHandler(
 
             except Exception:
                 pass
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                finally:
+                    self._conn = None
+        super().close()

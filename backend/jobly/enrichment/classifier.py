@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import logging
 import json
 import time
-import logging
-logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 
 import requests
@@ -28,18 +27,15 @@ OPENROUTER_URL = (
 FREE_REQUEST_INTERVAL_SECONDS = 3.1
 
 _last_free_request_at: float | None = None
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class GeminiUsage:
-    """
-    Temporary compatibility name.
-
-    Usage now comes from OpenRouter.
-    """
+class OpenRouterUsage:
 
     interaction_id: str | None = None
     model: str | None = None
+    provider: str | None = None
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -57,7 +53,22 @@ class ClassificationResult:
         | JobEnrichmentV3
     )
 
-    usage: GeminiUsage
+    usage: OpenRouterUsage
+
+
+class OpenRouterError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float = 0,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = status_code is None or status_code == 429 or status_code >= 500
+        self.error_class = f"openrouter_http_{status_code}" if status_code else "openrouter_request"
+        self.retry_after_seconds = retry_after_seconds
 
 
 def build_messages(
@@ -126,15 +137,29 @@ def _request_openrouter(
     model: str,
     messages: list[dict],
     response_schema: dict,
+    providers: tuple[str, ...] | None = None,
 ) -> requests.Response:
 
     settings = get_settings()
 
+    provider_config = {
+        "require_parameters": True,
+    }
 
+    selected_providers = providers
+    if selected_providers is None and model == settings.openrouter_paid_model:
+        selected_providers = settings.openrouter_paid_providers
+
+    if selected_providers:
+        provider_config.update(
+            {
+                "order": list(selected_providers),
+                "allow_fallbacks": False,
+            }
+        )
 
     body = {
         "model": model,
-
         "messages": messages,
 
         "response_format": {
@@ -147,15 +172,14 @@ def _request_openrouter(
             },
         },
 
-        "provider": {
-            "require_parameters": True,
-        },
+        "provider": provider_config,
 
         "usage": {
             "include": True,
         },
 
         "temperature": 0,
+        "max_tokens": settings.openrouter_max_output_tokens,
     }
 
     # GPT-OSS is used only as paid fallback.
@@ -166,6 +190,7 @@ def _request_openrouter(
         }
     elif model == settings.openrouter_paid_model:
         body["reasoning"] = {
+            # "enabled": False,
             "effort": "low",
         }
 
@@ -198,7 +223,7 @@ def _usage_from_response(
     data: dict,
     *,
     fallback_model: str,
-) -> GeminiUsage:
+) -> OpenRouterUsage:
 
     usage = (
         data.get("usage")
@@ -219,15 +244,22 @@ def _usage_from_response(
         or {}
     )
 
-    return GeminiUsage(
+    def safe_int(value) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    return OpenRouterUsage(
         interaction_id=data.get("id"),
 
         model=(
             data.get("model")
             or fallback_model
         ),
+        provider=data.get("provider"),
 
-        input_tokens=int(
+        input_tokens=safe_int(
             usage.get(
                 "prompt_tokens",
                 0,
@@ -235,7 +267,7 @@ def _usage_from_response(
             or 0
         ),
 
-        output_tokens=int(
+        output_tokens=safe_int(
             usage.get(
                 "completion_tokens",
                 0,
@@ -243,7 +275,7 @@ def _usage_from_response(
             or 0
         ),
 
-        thought_tokens=int(
+        thought_tokens=safe_int(
             completion_details.get(
                 "reasoning_tokens",
                 0,
@@ -251,7 +283,7 @@ def _usage_from_response(
             or 0
         ),
 
-        cached_tokens=int(
+        cached_tokens=safe_int(
             prompt_details.get(
                 "cached_tokens",
                 0,
@@ -259,7 +291,7 @@ def _usage_from_response(
             or 0
         ),
 
-        total_tokens=int(
+        total_tokens=safe_int(
             usage.get(
                 "total_tokens",
                 0,
@@ -324,6 +356,14 @@ def _free_error_allows_paid_fallback(
         phrase in message
         for phrase in fallback_phrases
     )
+
+
+def _retry_after_seconds(response: requests.Response) -> float:
+    value = response.headers.get("Retry-After", "").strip()
+    try:
+        return max(0.0, min(float(value), 30.0))
+    except ValueError:
+        return 0.0
 
 
 def _parse_response(
@@ -494,6 +534,10 @@ def classify_job(
                 free_response
             ):
 
+                retry_after = _retry_after_seconds(free_response)
+                if retry_after:
+                    time.sleep(retry_after)
+
                 logger.warning(
                     "AI free failed | model=%s | "
                     "status=%s | error=%s | "
@@ -506,9 +550,10 @@ def classify_job(
 
             else:
 
-                raise RuntimeError(
+                raise OpenRouterError(
                     "OpenRouter free request failed: "
-                    + error_message
+                    + error_message,
+                    status_code=free_response.status_code,
                 )
 
     # ========================================================
@@ -520,25 +565,28 @@ def classify_job(
     )
     try:
         paid_response = _request_openrouter(
-        model=settings.openrouter_paid_model,
-        messages=messages,
-        response_schema=response_schema,
-    )
+            model=settings.openrouter_paid_model,
+            messages=messages,
+            response_schema=response_schema,
+            providers=settings.openrouter_paid_providers,
+        )
 
     except requests.RequestException as exc:
 
-        raise RuntimeError(
+        raise OpenRouterError(
             "OpenRouter paid request failed: "
             f"{exc}"
         ) from exc
 
     if not paid_response.ok:
 
-        raise RuntimeError(
+        raise OpenRouterError(
             "OpenRouter paid request failed: "
             + _extract_error(
                 paid_response
-            )
+            ),
+            status_code=paid_response.status_code,
+            retry_after_seconds=_retry_after_seconds(paid_response),
         )
 
     paid_result = _parse_response(

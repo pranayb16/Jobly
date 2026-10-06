@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 US_STATE_CODES = {
@@ -123,10 +123,35 @@ US_COUNTRY_VALUES = {
 }
 
 
+NON_US_COUNTRY_VALUES = {
+    "australia",
+    "brazil",
+    "canada",
+    "china",
+    "france",
+    "ge",
+    "germany",
+    "india",
+    "ireland",
+    "japan",
+    "mexico",
+    "netherlands",
+    "new zealand",
+    "singapore",
+    "spain",
+    "united kingdom",
+    "uk",
+}
+
+
 @dataclass(frozen=True)
 class USLocationDecision:
-    eligible: bool
+    scope: Literal["us", "non_us", "unknown"]
     reason: str
+
+    @property
+    def eligible(self) -> bool:
+        return self.scope == "us"
 
 
 def normalize_text(
@@ -179,6 +204,41 @@ def country_value_is_us(
     return (
         normalize_text(value)
         in US_COUNTRY_VALUES
+    )
+
+
+def country_value_is_non_us(value: Any) -> bool:
+    if value is None:
+        return False
+
+    if isinstance(value, dict):
+        candidates = [
+            value.get("code"),
+            value.get("name"),
+            value.get("countryCode"),
+            value.get("country_code"),
+        ]
+        return any(country_value_is_non_us(candidate) for candidate in candidates)
+
+    return normalize_text(value) in NON_US_COUNTRY_VALUES
+
+
+def text_has_non_us_country(value: Any) -> bool:
+    text = normalize_text(value)
+    if not text or text_has_us_country(text):
+        return False
+
+    if re.search(r"\btbilisi\s*,?\s*georgia\b", text):
+        return True
+    if re.search(r"\bgeorgia\s*\(country\)", text):
+        return True
+    if re.search(r"(?:^|[,\s])ge(?:$|[,\s])", text):
+        return True
+
+    return any(
+        re.search(rf"\b{re.escape(country)}\b", text)
+        for country in NON_US_COUNTRY_VALUES
+        if len(country) > 2
     )
 
 
@@ -389,6 +449,17 @@ def ashby_has_us_country(
     return False
 
 
+def collect_structured_countries(provider: str, raw: dict) -> list[Any]:
+    if provider != "ashby":
+        return []
+
+    countries = [extract_country_from_address(raw.get("address"))]
+    for secondary in raw.get("secondaryLocations") or []:
+        if isinstance(secondary, dict):
+            countries.append(extract_country_from_address(secondary.get("address")))
+    return [country for country in countries if country is not None]
+
+
 def collect_location_strings(
     provider: str,
     raw: dict,
@@ -549,6 +620,7 @@ def classify_us_job(
     provider: str,
     location: str | None,
     raw: dict | None,
+    description: str | None = None,
 ) -> USLocationDecision:
 
     provider = (
@@ -567,32 +639,22 @@ def classify_us_job(
     )
 
 
-    # Ashby often gives us structured
-    # country data. Prefer that.
-
-    if (
-        provider == "ashby"
-        and ashby_has_us_country(
-            raw
-        )
-    ):
-
-        return USLocationDecision(
-            eligible=True,
-            reason=(
-                "ashby_country_us"
-            ),
-        )
+    structured_countries = collect_structured_countries(provider, raw)
+    if any(country_value_is_us(country) for country in structured_countries):
+        return USLocationDecision(scope="us", reason="ashby_country_us")
+    if any(country_value_is_non_us(country) for country in structured_countries):
+        return USLocationDecision(scope="non_us", reason="structured_country_non_us")
 
 
     # Primary normalized ATS location.
 
-    if text_is_clearly_us(
-        location
-    ):
+    if text_has_non_us_country(location):
+        return USLocationDecision(scope="non_us", reason="primary_location_non_us")
+
+    if text_is_clearly_us(location):
 
         return USLocationDecision(
-            eligible=True,
+            scope="us",
             reason=(
                 "primary_location_us"
             ),
@@ -609,18 +671,15 @@ def classify_us_job(
     )
 
 
-    for value in location_strings:
+    if any(text_is_clearly_us(value) for value in location_strings):
+        return USLocationDecision(scope="us", reason="structured_location_us")
+    if any(text_has_non_us_country(value) for value in location_strings):
+        return USLocationDecision(scope="non_us", reason="structured_location_non_us")
 
-        if text_is_clearly_us(
-            value
-        ):
-
-            return USLocationDecision(
-                eligible=True,
-                reason=(
-                    "structured_location_us"
-                ),
-            )
+    if text_has_us_country(description):
+        return USLocationDecision(scope="us", reason="description_country_us")
+    if text_has_non_us_country(description):
+        return USLocationDecision(scope="non_us", reason="description_country_non_us")
 
 
     # Important:
@@ -629,7 +688,7 @@ def classify_us_job(
     # that a role is available in the U.S.
 
     return USLocationDecision(
-        eligible=False,
+        scope="unknown",
         reason=(
             "no_clear_us_evidence"
         ),

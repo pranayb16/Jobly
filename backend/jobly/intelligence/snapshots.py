@@ -110,15 +110,7 @@ def calculate_ai_counts(
         # Roles
         # -----------------------------------------------------
 
-        role = (
-            data.get(
-                "standardized_title"
-            )
-            or
-            data.get(
-                "job_family"
-            )
-        )
+        role = data.get("standardized_title")
 
         if role:
             roles[
@@ -131,9 +123,8 @@ def calculate_ai_counts(
 
         for skill in set(
             _strings(
-                data.get(
-                    "skills"
-                )
+                _strings(data.get("required_skills"))
+                + _strings(data.get("preferred_skills"))
             )
         ):
             skills[
@@ -290,6 +281,7 @@ def build_snapshots(
                             FROM jobs
                             WHERE company_id = %s
                               AND active = TRUE
+                              AND is_us_job IS TRUE
                         ),
 
                         COUNT(*) FILTER (
@@ -323,6 +315,7 @@ def build_snapshots(
 
                     JOIN jobs AS j
                       ON j.id = e.job_id
+                     AND j.is_us_job IS TRUE
 
                     WHERE j.company_id = %s
                       AND e.occurred_at::date = %s
@@ -358,6 +351,10 @@ def build_snapshots(
 
                         e.skills,
 
+                        e.required_skills,
+
+                        e.preferred_skills,
+
                         e.seniority,
 
                         e.locations,
@@ -379,6 +376,8 @@ def build_snapshots(
                     WHERE j.company_id = %s
 
                       AND j.active = TRUE
+
+                      AND j.is_us_job IS TRUE
 
                       AND e.schema_version = %s
                     """,
@@ -547,9 +546,11 @@ def build_snapshots(
                     ),
                 )
 
-            conn.commit()
-
             created += 1
+
+        # Publish the day atomically. If any company fails, the connection
+        # context rolls back every row for this snapshot date.
+        conn.commit()
 
     return SnapshotSummary(
         snapshot_date=day,

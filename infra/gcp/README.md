@@ -9,7 +9,7 @@ Vercel (Next.js intelligence UI)
 
 Cloud Scheduler (once/day, America/Chicago)
   -> Cloud Run job (daily pipeline)
-     -> ATS APIs + Cloud SQL + bounded Gemini work
+     -> ATS APIs + Cloud SQL + bounded OpenRouter work
 ```
 
 The API and pipeline use the same image. Build from the repository root so
@@ -33,11 +33,13 @@ gcloud run deploy jobly-api \
   --region us-central1 \
   --port 8080 \
   --add-cloudsql-instances PROJECT_ID:us-central1:INSTANCE \
-  --set-secrets DATABASE_URL=jobly-database-url:latest \
+  --set-secrets DATABASE_URL=jobly-database-url:latest,ADMIN_API_TOKEN=jobly-admin-api-token:latest \
   --set-env-vars APP_ENV=production,LOG_LEVEL=INFO,FRONTEND_ORIGIN=https://YOUR_FRONTEND_HOST,SOURCE_TARGET_COUNT=1000
 ```
 
 Set Vercel's server-only `JOBS_API_URL` to the resulting service URL.
+The admin API fails closed without `ADMIN_API_TOKEN`. Do not forward that service token
+from a public frontend; add user authentication before enabling the admin UI publicly.
 
 ## Deploy the daily pipeline job
 
@@ -48,8 +50,8 @@ gcloud run jobs deploy jobly-pipeline \
   --command python \
   --args=-m,jobly.commands.pipeline \
   --add-cloudsql-instances PROJECT_ID:us-central1:INSTANCE \
-  --set-secrets DATABASE_URL=jobly-database-url:latest,GEMINI_API_KEY=jobly-gemini-api-key:latest \
-  --set-env-vars APP_ENV=production,LOG_LEVEL=INFO,AI_MODEL=gemini-3.5-flash-lite,AI_CLASSIFICATION_VERSION=v2,AI_PROMPT_VERSION=v2,AI_MAX_ATTEMPTS=5,AI_ENRICHMENT_LIMIT=5000,SOURCE_TARGET_COUNT=1000 \
+  --set-secrets DATABASE_URL=jobly-database-url:latest,OPENROUTER_API_KEY=jobly-openrouter-api-key:latest \
+  --set-env-vars APP_ENV=production,LOG_LEVEL=INFO,OPENROUTER_FREE_MODEL=openai/gpt-oss-20b:free,OPENROUTER_PAID_MODEL=openai/gpt-oss-20b,AI_CLASSIFICATION_VERSION=v3,AI_PROMPT_VERSION=v3,AI_MAX_ATTEMPTS=5,AI_ENRICHMENT_LIMIT=5000,SOURCE_TARGET_COUNT=1000 \
   --task-timeout 86400s \
   --max-retries 1
 ```

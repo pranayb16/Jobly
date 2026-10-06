@@ -1,3 +1,5 @@
+import pytest
+
 from jobly.commands.bootstrap_enrichment import (
     enqueue_bootstrap,
 )
@@ -8,7 +10,11 @@ from jobly.enrichment.schemas_v2 import (
 from jobly.enrichment.worker import (
     _build_canonical_projection,
     claim_next_queue_item,
+    process_item,
+    run_enrichment,
     save_success,
+    save_failure,
+    requeue_failed_enrichment,
 )
 
 
@@ -118,9 +124,111 @@ def test_queue_claim_orders_new_then_changed_then_bootstrap():
     )
 
     assert (
-        "ORDER BY priority ASC, created_at ASC"
+        "ORDER BY q.priority ASC, q.created_at ASC"
         in conn.statements[0][0]
     )
+
+    assert "j.active = TRUE" in conn.statements[0][0]
+    assert (
+        "j.enrichment_eligibility = 'eligible'"
+        in conn.statements[0][0]
+    )
+    assert "INTERVAL '7 days'" in conn.statements[0][0]
+
+
+def test_failed_ai_attempt_consumes_run_limit(monkeypatch):
+    class RunConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    items = [
+        {"queue_id": 1, "id": 11},
+        {"queue_id": 2, "id": 12},
+        {"queue_id": 3, "id": 13},
+    ]
+    claims = 0
+
+    def claim(_conn, _excluded):
+        nonlocal claims
+        claims += 1
+        return items.pop(0) if items else None
+
+    def fail_after_attempt(
+        _conn,
+        _item,
+        on_ai_attempt=None,
+    ):
+        assert on_ai_attempt is not None
+        on_ai_attempt()
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(
+        "jobly.enrichment.worker.get_connection",
+        lambda: RunConnection(),
+    )
+    monkeypatch.setattr(
+        "jobly.enrichment.worker.recover_stale_queue",
+        lambda _conn: None,
+    )
+    monkeypatch.setattr(
+        "jobly.enrichment.worker.claim_next_queue_item",
+        claim,
+    )
+    monkeypatch.setattr(
+        "jobly.enrichment.worker.process_item",
+        fail_after_attempt,
+    )
+    monkeypatch.setattr(
+        "jobly.enrichment.worker.save_failure",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(
+        "jobly.enrichment.worker.count_backlog",
+        lambda _conn: len(items),
+    )
+
+    summary = run_enrichment(limit=1)
+
+    assert summary.ai_calls == 1
+    assert summary.processed == 1
+    assert summary.failed == 1
+    assert claims == 1
+    assert len(items) == 2
+
+
+def test_inactive_job_is_rejected_before_ai(monkeypatch):
+    conn = Connection(
+        fetchone_values=[
+            {
+                "content_hash": "current-hash",
+                "active": False,
+                "enrichment_eligibility": "eligible",
+                "posted_at": None,
+            }
+        ]
+    )
+    item = {
+        "id": 11,
+        "queue_id": 1,
+        "queue_hash": "current-hash",
+        "content_hash": "current-hash",
+    }
+    monkeypatch.setattr(
+        "jobly.enrichment.worker.classify_job",
+        lambda *_args, **_kwargs: pytest.fail(
+            "inactive job reached AI"
+        ),
+    )
+
+    result, usage = process_item(conn, item)
+
+    assert result == "not_eligible"
+    assert usage is None
+    statements = " ".join(sql for sql, _params in conn.statements)
+    assert "status = 'not_eligible'" in statements
 
 
 def test_queue_schema_prevents_duplicate_job_hash_pairs():
@@ -238,10 +346,10 @@ def test_bootstrap_is_idempotent_by_conflict_rule():
     )
 
     assert (
-        "ON CONFLICT ( job_id, content_hash )"
+            "ON CONFLICT ( job_id, content_hash, schema_version )"
         in normalized_sql
         or
-        "ON CONFLICT (job_id, content_hash)"
+            "ON CONFLICT (job_id, content_hash, schema_version)"
         in normalized_sql
     )
 
@@ -274,6 +382,47 @@ def test_bootstrap_is_idempotent_by_conflict_rule():
         "'failed'"
         in normalized_sql
     )
+
+    assert "j.enrichment_eligibility = 'eligible'" in normalized_sql
+    assert "INTERVAL '7 days'" in normalized_sql
+
+
+def test_retryable_failure_is_delayed_with_exponential_backoff():
+    conn = Connection()
+    terminal = save_failure(
+        conn,
+        {"queue_id": 9, "queue_attempts": 3, "id": 4, "queue_hash": "hash"},
+        RuntimeError("temporary outage"),
+    )
+    assert terminal is False
+    queue_params = conn.statements[0][1]
+    assert queue_params[0] == "pending"
+    assert queue_params[3] is True
+    assert queue_params[5] == 120
+
+
+def test_invalid_payload_failure_is_terminal_and_manual_retry_is_scoped():
+    conn = Connection(rowcounts=[0, 2])
+    assert save_failure(
+        conn,
+        {"queue_id": 9, "queue_attempts": 1, "id": 4, "queue_hash": "hash"},
+        ValueError("invalid payload"),
+    ) is True
+    assert conn.statements[0][1][0] == "failed"
+    assert conn.statements[0][1][3] is False
+
+    assert requeue_failed_enrichment(conn) == 2
+    retry_sql, retry_params = conn.statements[-1]
+    assert "q.retryable IS TRUE" in retry_sql
+    assert retry_params == (False,)
+
+
+def test_claim_is_versioned_and_only_selects_due_retries():
+    conn = Connection(fetchone_values=[None])
+    claim_next_queue_item(conn)
+    sql = conn.statements[0][0]
+    assert "q.schema_version = %s" in sql
+    assert "q.next_attempt_at <= NOW()" in sql
 
 
 def test_canonical_projection_combines_skills_and_certifications():

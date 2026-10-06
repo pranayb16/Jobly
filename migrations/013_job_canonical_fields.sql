@@ -273,12 +273,18 @@ SET
 
     years_experience_min = COALESCE(
         years_experience_min,
-        NULLIF(data->>'years_experience_min', '')::integer
+        CASE
+            WHEN data->>'years_experience_min' ~ '^\d+$'
+            THEN (data->>'years_experience_min')::integer
+        END
     ),
 
     years_experience_max = COALESCE(
         years_experience_max,
-        NULLIF(data->>'years_experience_max', '')::integer
+        CASE
+            WHEN data->>'years_experience_max' ~ '^\d+$'
+            THEN (data->>'years_experience_max')::integer
+        END
     ),
 
     education_required = COALESCE(
@@ -356,7 +362,10 @@ SET
 
     relocation_available = COALESCE(
         relocation_available,
-        NULLIF(data->>'relocation_available', '')::boolean
+        CASE
+            WHEN LOWER(data->>'relocation_available') IN ('true', 'false')
+            THEN (data->>'relocation_available')::boolean
+        END
     ),
 
     employment_type = COALESCE(
@@ -366,12 +375,18 @@ SET
 
     salary_min = COALESCE(
         salary_min,
-        NULLIF(data->>'salary_min', '')::numeric
+        CASE
+            WHEN data->>'salary_min' ~ '^\d+(\.\d+)?$'
+            THEN (data->>'salary_min')::numeric
+        END
     ),
 
     salary_max = COALESCE(
         salary_max,
-        NULLIF(data->>'salary_max', '')::numeric
+        CASE
+            WHEN data->>'salary_max' ~ '^\d+(\.\d+)?$'
+            THEN (data->>'salary_max')::numeric
+        END
     ),
 
     salary_currency = COALESCE(
@@ -391,7 +406,10 @@ SET
 
     work_authorization_required = COALESCE(
         work_authorization_required,
-        NULLIF(data->>'work_authorization_required', '')::boolean
+        CASE
+            WHEN LOWER(data->>'work_authorization_required') IN ('true', 'false')
+            THEN (data->>'work_authorization_required')::boolean
+        END
     ),
 
     citizenship_requirement = COALESCE(
@@ -401,7 +419,10 @@ SET
 
     security_clearance_required = COALESCE(
         security_clearance_required,
-        NULLIF(data->>'security_clearance_required', '')::boolean
+        CASE
+            WHEN LOWER(data->>'security_clearance_required') IN ('true', 'false')
+            THEN (data->>'security_clearance_required')::boolean
+        END
     ),
 
     security_clearance_level = COALESCE(
@@ -413,7 +434,12 @@ SET
 -- Recalculate skill_count after backfill.
 
 UPDATE job_enrichments
-SET skill_count = jsonb_array_length(skills);
+SET skill_count = jsonb_array_length(
+    CASE
+        WHEN jsonb_typeof(skills) = 'array' THEN skills
+        ELSE '[]'::jsonb
+    END
+);
 
 
 -- ============================================================
@@ -464,6 +490,7 @@ WITH current_enrichment AS (
     JOIN jobs AS j
       ON j.id = e.job_id
      AND j.content_hash = e.content_hash
+    WHERE e.schema_version = 'v3'
     ORDER BY
         e.job_id,
         e.created_at DESC,

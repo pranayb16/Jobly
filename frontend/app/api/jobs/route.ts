@@ -1,8 +1,8 @@
-import { NextResponse } from 'next/server';
+import { connection, NextResponse } from 'next/server';
 import { mockJobs } from '@/lib/mockJobs';
 
 export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const revalidate = 60;
 
 type JobRow = Record<string, unknown>;
 type JobsApiPayload = { count?: number; jobs?: JobRow[] };
@@ -46,18 +46,22 @@ function decodeDisplayValue(value: unknown, fallback: string) {
 }
 
 function normalizeJob(row: JobRow, index: number) {
+  const postedAt = first(row, ['posted_at', 'date_posted'], null) as string | null;
+  const observedAt = first(row, ['first_seen_at'], null) as string | null;
   return {
     id: first(row, ['id', 'job_id'], index + 1) as string | number,
     title: String(first(row, ['title', 'job_title', 'position'], 'Untitled role')),
-    company: decodeDisplayValue(first(row, ['company', 'company_name', 'organization'], 'Company'), 'Company'),
-    location: String(first(row, ['location', 'job_location', 'city'], 'Location flexible')),
+    company: decodeDisplayValue(first(row, ['company', 'company_name', 'organization'], ''), ''),
+    location: String(first(row, ['location', 'job_location', 'city'], '')),
     description: String(first(row, ['description_excerpt', 'description'], '')),
-    employmentType: String(first(row, ['employment_type', 'job_type', 'type'], 'full_time')),
+    employmentType: String(first(row, ['employment_type', 'job_type', 'type'], '')),
     workplaceType: String(first(row, ['workplace_type', 'work_mode', 'remote_type'], '')),
     salaryMin: numberOrNull(first(row, ['salary_min', 'min_salary'], null)),
     salaryMax: numberOrNull(first(row, ['salary_max', 'max_salary'], null)),
-    salaryCurrency: String(first(row, ['salary_currency', 'currency'], 'USD')),
-    createdAt: first(row, ['posted_at', 'created_at', 'date_posted', 'first_seen_at'], null) as string | null,
+    salaryCurrency: String(first(row, ['salary_currency', 'currency'], '')),
+    salaryPeriod: String(first(row, ['salary_period'], '')),
+    createdAt: postedAt ?? observedAt,
+    dateSource: postedAt ? 'posted' as const : observedAt ? 'observed' as const : null,
     provider: String(first(row, ['provider', 'source'], '')),
     jobUrl: String(first(row, ['job_url', 'url'], '')),
     applyUrl: String(first(row, ['apply_url', 'application_url'], '')),
@@ -74,7 +78,7 @@ function normalizeJob(row: JobRow, index: number) {
 }
 
 function isWithinLast48Hours(row: JobRow) {
-  const value = first(row, ['posted_at', 'created_at', 'date_posted', 'first_seen_at'], null);
+  const value = first(row, ['posted_at', 'date_posted'], null);
   if (!value) return false;
 
   const postedAt = new Date(String(value)).getTime();
@@ -84,9 +88,10 @@ function isWithinLast48Hours(row: JobRow) {
   return age >= 0 && age <= 48 * 60 * 60 * 1000;
 }
 
-async function fetchJobsPage(apiBaseUrl: string, offset: number) {
-  const response = await fetch(`${apiBaseUrl}/api/jobs?limit=100&offset=${offset}`, {
-    cache: 'no-store',
+async function fetchRecentJobs(apiBaseUrl: string) {
+  const postedSince = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  const response = await fetch(`${apiBaseUrl}/api/jobs?limit=5000&posted_since=${encodeURIComponent(postedSince)}`, {
+    next: { revalidate: 60 },
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(10_000),
   });
@@ -100,6 +105,7 @@ async function fetchJobsPage(apiBaseUrl: string, offset: number) {
 
 
 export async function GET() {
+  await connection();
   try {
     let rows: JobRow[];
 
@@ -107,21 +113,8 @@ export async function GET() {
       rows = mockJobs.filter(isWithinLast48Hours);
     } else {
       const apiBaseUrl = (process.env.JOBS_API_URL ?? 'http://localhost:8000').replace(/\/$/, '');
-      rows = [];
-      let offset = 0;
-      let totalActiveJobs = Number.POSITIVE_INFINITY;
-      let reachedOlderJobs = false;
-
-      while (offset < totalActiveJobs && !reachedOlderJobs) {
-        const page = await fetchJobsPage(apiBaseUrl, offset);
-        const pageRows = Array.isArray(page.jobs) ? page.jobs : [];
-        totalActiveJobs = typeof page.count === 'number' ? page.count : offset + pageRows.length;
-        rows.push(...pageRows.filter(isWithinLast48Hours));
-        reachedOlderJobs = pageRows.some((row) => !isWithinLast48Hours(row));
-        offset += 100;
-        if (pageRows.length === 0) break;
-      }
-
+      const page = await fetchRecentJobs(apiBaseUrl);
+      rows = Array.isArray(page.jobs) ? page.jobs.filter(isWithinLast48Hours) : [];
     }
 
     const jobs = rows.map(normalizeJob).sort((a, b) => {

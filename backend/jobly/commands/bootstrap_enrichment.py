@@ -27,6 +27,7 @@ def enqueue_bootstrap(
             INSERT INTO enrichment_queue (
                 job_id,
                 content_hash,
+                schema_version,
                 priority,
                 reason
             )
@@ -34,6 +35,7 @@ def enqueue_bootstrap(
             SELECT
                 j.id,
                 j.content_hash,
+                %s,
                 3,
                 'bootstrap'
 
@@ -42,6 +44,13 @@ def enqueue_bootstrap(
             WHERE j.active = TRUE
 
               AND j.content_hash IS NOT NULL
+
+              AND j.enrichment_eligibility = 'eligible'
+
+              AND (
+                  j.posted_at IS NULL
+                  OR j.posted_at >= NOW() - INTERVAL '7 days'
+              )
 
               -- Do not repeatedly enrich jobs already known to
               -- be outside the U.S. market.
@@ -64,7 +73,8 @@ def enqueue_bootstrap(
 
             ON CONFLICT (
                 job_id,
-                content_hash
+                content_hash,
+                schema_version
             )
 
             DO UPDATE SET
@@ -83,6 +93,12 @@ def enqueue_bootstrap(
 
                 last_error = NULL
 
+                , error_class = NULL
+
+                , retryable = NULL
+
+                , next_attempt_at = NULL
+
             WHERE enrichment_queue.status
                   IN (
                       'completed',
@@ -90,6 +106,7 @@ def enqueue_bootstrap(
                   )
             """,
             (
+                schema_version,
                 schema_version,
             ),
         )

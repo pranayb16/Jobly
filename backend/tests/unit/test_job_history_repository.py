@@ -6,11 +6,14 @@ from datetime import (
     timedelta,
 )
 
+import pytest
+
 from jobly.jobs.models import (
     Job,
     JobDescription,
 )
 from jobly.jobs.repository import (
+    determine_enrichment_eligibility,
     mark_missing_jobs_inactive,
     save_job,
 )
@@ -45,6 +48,9 @@ class RecordingCursor:
         sql,
         params=None,
     ):
+        if params is not None:
+            assert sql.count("%s") == len(params)
+
         self.statements.append(
             (
                 " ".join(
@@ -189,6 +195,7 @@ def test_first_crawl_job_is_bootstrap(
     )
 
     assert queue[2:] == (
+        "v3",
         3,
         "bootstrap",
     )
@@ -241,6 +248,7 @@ def test_new_job_after_baseline_is_high_priority(
     )
 
     assert queue[2:] == (
+        "v3",
         1,
         "new_job",
     )
@@ -265,6 +273,8 @@ def test_changed_job_preserves_version_and_queues_changed_content(
         None,
         {},
         7,
+        None,
+        None,
     )
 
     cursor = RecordingCursor(
@@ -325,6 +335,7 @@ def test_changed_job_preserves_version_and_queues_changed_content(
     )
 
     assert queue[2:] == (
+        "v3",
         2,
         "changed_job",
     )
@@ -355,6 +366,8 @@ def test_unchanged_job_does_not_create_version_or_queue(
         None,
         job.raw,
         7,
+        None,
+        None,
     )
 
     cursor = RecordingCursor(
@@ -411,6 +424,8 @@ def test_reactivated_job_creates_reactivation_event(
         None,
         job.raw,
         7,
+        None,
+        None,
     )
 
     cursor = RecordingCursor(
@@ -507,3 +522,82 @@ def test_lever_job_without_posted_at_is_queued(
         "INSERT INTO enrichment_queue"
         in sql_text(cursor)
     )
+
+
+def test_job_older_than_seven_days_is_not_queued(
+    monkeypatch,
+):
+    prepare(monkeypatch)
+    now = datetime.now(UTC)
+    cursor = RecordingCursor(existing=None)
+
+    save_job(
+        cursor,
+        1,
+        2,
+        now - timedelta(days=1),
+        now,
+        make_job(posted_at=now - timedelta(days=8)),
+    )
+
+    assert "INSERT INTO enrichment_queue" not in sql_text(cursor)
+    insert_params = next(
+        params
+        for statement, params in cursor.statements
+        if "INSERT INTO jobs" in statement
+    )
+    assert "not_eligible" in insert_params
+    assert "older_than_7_days" in insert_params
+
+
+def test_enrichment_window_boundary_and_non_us_precedence():
+    now = datetime(2026, 10, 6, tzinfo=UTC)
+
+    assert determine_enrichment_eligibility(
+        now - timedelta(days=6, hours=23),
+        now=now,
+    ) == ("eligible", None)
+    assert determine_enrichment_eligibility(
+        now - timedelta(days=8),
+        now=now,
+    ) == ("not_eligible", "older_than_7_days")
+    assert determine_enrichment_eligibility(
+        None,
+        now=now,
+    ) == ("eligible", None)
+    assert determine_enrichment_eligibility(
+        now,
+        is_us_job=False,
+        now=now,
+    ) == ("not_eligible", "non_us")
+
+
+def test_source_owned_company_is_authoritative(monkeypatch):
+    monkeypatch.setattr(
+        "jobly.jobs.repository.ensure_company",
+        lambda *_args: pytest.fail("provider label must not replace source company"),
+    )
+    monkeypatch.setattr(
+        "jobly.jobs.repository.link_source_company",
+        lambda *_args: pytest.fail("source company is already linked"),
+    )
+    cursor = RecordingCursor(existing=None)
+
+    save_job(
+        cursor,
+        1,
+        2,
+        None,
+        datetime.now(UTC),
+        make_job(),
+        source_company_id=42,
+        source_company_name="Canonical Company",
+    )
+
+    insert_params = next(
+        params
+        for statement, params in cursor.statements
+        if "INSERT INTO jobs" in statement
+    )
+    assert insert_params[1] == 42
+    assert insert_params[4] == "Canonical Company"

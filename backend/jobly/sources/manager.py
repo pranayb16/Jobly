@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+import requests
+
 from jobly.companies.repository import ensure_company
 from jobly.crawling.runner import crawl_source
 from jobly.db.connection import get_connection
@@ -45,9 +47,23 @@ def count_active_sources(cur) -> int:
 def _next_candidate(cur):
     cur.execute(
         """
+        UPDATE source_candidates
+        SET status = 'pending', updated_at = NOW(),
+            validation_error = 'recovered stale validation lease'
+        WHERE status = 'validating'
+          AND updated_at < NOW() - INTERVAL '30 minutes'
+        """
+    )
+    cur.execute(
+        """
         SELECT id, provider, canonical_url, board_id, company_name, status
         FROM source_candidates
         WHERE status IN ('pending', 'valid')
+          AND (
+              status = 'valid'
+              OR last_validated_at IS NULL
+              OR last_validated_at < NOW() - INTERVAL '15 minutes'
+          )
         ORDER BY CASE status WHEN 'valid' THEN 0 ELSE 1 END, id
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -88,19 +104,25 @@ def _promote_candidate(conn, candidate, *, validate: bool) -> tuple[bool, bool]:
         try:
             jobs = crawl_source(provider, url)
         except Exception as exc:
+            transient = isinstance(exc, (requests.RequestException, OSError, TimeoutError))
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE source_candidates
-                    SET status = 'invalid', validation_error = %s,
+                    SET status = %s, validation_error = %s,
                         last_validated_at = NOW(), updated_at = NOW()
                     WHERE id = %s
                     """,
-                    (str(exc)[:2000], candidate_id),
+                    ("pending" if transient else "invalid", str(exc)[:2000], candidate_id),
                 )
             conn.commit()
-            logger.warning("source_candidate_invalid id=%s error=%s", candidate_id, exc)
-            return False, True
+            logger.warning(
+                "source_candidate_validation_failed id=%s retryable=%s error=%s",
+                candidate_id,
+                transient,
+                exc,
+            )
+            return False, not transient
         logger.info("source_candidate_valid id=%s jobs_found=%s", candidate_id, len(jobs))
 
     with conn.cursor() as cur:

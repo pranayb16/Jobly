@@ -6,6 +6,8 @@ import argparse
 
 import logging
 
+from collections.abc import Callable
+
 from dataclasses import dataclass
 
 
@@ -22,7 +24,7 @@ from jobly.db.connection import get_connection
 
 from jobly.enrichment.classifier import (
 
-    GeminiUsage,
+    OpenRouterUsage,
 
     classify_job,
 
@@ -45,13 +47,12 @@ from jobly.enrichment.schemas_v3 import (
     JobEnrichmentV3,
 )
 
+from jobly.jobs.repository import (
+    determine_enrichment_eligibility,
+)
 
 
 from jobly.market.us_scope import classify_us_job
-
-from jobly.observability.repository import (
-    record_event,
-)
 
 from jobly.logging_config import (
     configure_logging,
@@ -137,6 +138,11 @@ def recover_stale_queue(
 
                 started_at = NULL,
 
+                next_attempt_at = CASE
+                    WHEN attempts >= %s THEN NULL
+                    ELSE NOW() + INTERVAL '15 minutes'
+                END,
+
 
 
                 last_error = COALESCE(
@@ -161,6 +167,7 @@ def recover_stale_queue(
 
             (
 
+                settings.ai_max_attempts,
                 settings.ai_max_attempts,
 
             ),
@@ -189,12 +196,22 @@ def count_backlog(
 
             SELECT COUNT(*)
 
-            FROM enrichment_queue
+            FROM enrichment_queue AS q
+            JOIN jobs AS j
+              ON j.id = q.job_id
+             AND j.content_hash = q.content_hash
+            WHERE q.status = 'pending'
+              AND q.attempts < %s
+              AND q.schema_version = %s
+              AND (q.next_attempt_at IS NULL OR q.next_attempt_at <= NOW())
+              AND j.active = TRUE
+              AND j.enrichment_eligibility = 'eligible'
 
-            WHERE status = 'pending'
-
-            """
-
+            """,
+            (
+                get_settings().ai_max_attempts,
+                get_settings().ai_classification_version,
+            ),
         )
 
 
@@ -222,25 +239,38 @@ def claim_next_queue_item(
             cur.execute(
                 """
                 SELECT
-                    id,
-                    job_id,
-                    content_hash,
-                    priority,
-                    reason,
-                    attempts
+                    q.id,
+                    q.job_id,
+                    q.content_hash,
+                    q.schema_version,
+                    q.priority,
+                    q.reason,
+                    q.attempts
 
-                FROM enrichment_queue
+                FROM enrichment_queue AS q
 
-                WHERE status = 'pending'
-                  AND attempts < %s
+                JOIN jobs AS j
+                  ON j.id = q.job_id
+                 AND j.content_hash = q.content_hash
+
+                WHERE q.status = 'pending'
+                  AND q.attempts < %s
+                  AND q.schema_version = %s
+                  AND (q.next_attempt_at IS NULL OR q.next_attempt_at <= NOW())
+                  AND j.active = TRUE
+                  AND j.enrichment_eligibility = 'eligible'
+                  AND (
+                      j.posted_at IS NULL
+                      OR j.posted_at >= NOW() - INTERVAL '7 days'
+                  )
                   AND NOT (
-                      id = ANY(%s::bigint[])
+                      q.id = ANY(%s::bigint[])
                   )
 
                 ORDER BY
-                    priority ASC,
-                    created_at ASC,
-                    id ASC
+                    q.priority ASC,
+                    q.created_at ASC,
+                    q.id ASC
 
                 FOR UPDATE SKIP LOCKED
 
@@ -248,6 +278,7 @@ def claim_next_queue_item(
                 """,
                 (
                     settings.ai_max_attempts,
+                    settings.ai_classification_version,
                     list(excluded_queue_ids),
                 ),
             )
@@ -257,22 +288,35 @@ def claim_next_queue_item(
             cur.execute(
                 """
                 SELECT
-                    id,
-                    job_id,
-                    content_hash,
-                    priority,
-                    reason,
-                    attempts
+                    q.id,
+                    q.job_id,
+                    q.content_hash,
+                    q.schema_version,
+                    q.priority,
+                    q.reason,
+                    q.attempts
 
-                FROM enrichment_queue
+                FROM enrichment_queue AS q
 
-                WHERE status = 'pending'
-                  AND attempts < %s
+                JOIN jobs AS j
+                  ON j.id = q.job_id
+                 AND j.content_hash = q.content_hash
+
+                WHERE q.status = 'pending'
+                  AND q.attempts < %s
+                  AND q.schema_version = %s
+                  AND (q.next_attempt_at IS NULL OR q.next_attempt_at <= NOW())
+                  AND j.active = TRUE
+                  AND j.enrichment_eligibility = 'eligible'
+                  AND (
+                      j.posted_at IS NULL
+                      OR j.posted_at >= NOW() - INTERVAL '7 days'
+                  )
 
                 ORDER BY
-                    priority ASC,
-                    created_at ASC,
-                    id ASC
+                    q.priority ASC,
+                    q.created_at ASC,
+                    q.id ASC
 
                 FOR UPDATE SKIP LOCKED
 
@@ -280,6 +324,7 @@ def claim_next_queue_item(
                 """,
                 (
                     settings.ai_max_attempts,
+                    settings.ai_classification_version,
                 ),
             )
 
@@ -297,7 +342,9 @@ def claim_next_queue_item(
                 status = 'processing',
                 started_at = NOW(),
                 attempts = attempts + 1,
-                last_error = NULL
+                last_error = NULL,
+                error_class = NULL,
+                next_attempt_at = NULL
 
             WHERE id = %s
 
@@ -325,6 +372,8 @@ def claim_next_queue_item(
                 workplace_type,
                 posted_at,
                 posted_at_source,
+                active,
+                enrichment_eligibility,
                 description_text,
                 raw_payload,
                 content_hash
@@ -353,6 +402,9 @@ def claim_next_queue_item(
 
         "queue_hash":
             queue_item["content_hash"],
+
+        "queue_schema_version":
+            queue_item["schema_version"],
 
         "queue_attempts":
             queue_item["attempts"],
@@ -443,7 +495,15 @@ def _mark_non_us(
 
                 classification_status =
 
-                    'skipped_non_us',
+                    'not_eligible',
+
+                enrichment_eligibility =
+
+                    'not_eligible',
+
+                enrichment_eligibility_reason =
+
+                    'non_us',
 
                 classification_started_at = NULL,
 
@@ -479,7 +539,7 @@ def _mark_non_us(
 
             SET
 
-                status = 'completed',
+                status = 'not_eligible',
 
                 completed_at = NOW(),
 
@@ -505,6 +565,58 @@ def _mark_non_us(
 
 
 
+
+
+def _defer_unknown_us_scope(
+    conn,
+    item: dict,
+    reason: str,
+) -> None:
+    settings = get_settings()
+    terminal = item["queue_attempts"] >= settings.ai_max_attempts
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE jobs
+            SET
+                is_us_job = NULL,
+                us_location_reason = %s,
+                classification_status = %s,
+                classification_started_at = NULL,
+                classification_error = %s
+            WHERE id = %s
+              AND content_hash = %s
+            """,
+            (
+                reason,
+                "failed" if terminal else "pending",
+                reason,
+                item["id"],
+                item["queue_hash"],
+            ),
+        )
+        cur.execute(
+            """
+            UPDATE enrichment_queue
+            SET
+                status = %s,
+                started_at = NULL,
+                last_error = %s,
+                error_class = 'unknown_scope',
+                retryable = FALSE,
+                next_attempt_at = CASE WHEN %s THEN NULL ELSE NOW() + INTERVAL '15 minutes' END,
+                completed_at = CASE WHEN %s THEN NOW() ELSE NULL END
+            WHERE id = %s
+            """,
+            (
+                "failed" if terminal else "pending",
+                reason,
+                terminal,
+                terminal,
+                item["queue_id"],
+            ),
+        )
+    conn.commit()
 
 
 def _unique_strings(
@@ -793,6 +905,7 @@ def _ashby_ats_locations(
             EnrichedLocationV3(
                 city=city,
                 state=state,
+                state_code=None,
                 country=country,
                 country_code=(
                     _country_code(
@@ -921,6 +1034,113 @@ def _merge_locations(
     return result
 
 
+def _trusted_ats_locations(
+    item: dict,
+    structured_context: dict,
+) -> list[EnrichedLocationV3]:
+    result = _ashby_ats_locations(item)
+
+    for value in structured_context.get("locations") or []:
+        label = _simple_location_label(value)
+        if not label:
+            continue
+        candidate = EnrichedLocationV3(
+            city=label,
+            state=None,
+            state_code=None,
+            country=None,
+            country_code=None,
+        )
+        if not any(_locations_match(existing, candidate) for existing in result):
+            result.append(candidate)
+
+    return result
+
+
+def _first_value(mapping: dict, *keys: str):
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_salary_period(value) -> str | None:
+    normalized = str(value or "").strip().lower().replace("_", "")
+    return {
+        "hour": "hour",
+        "hourly": "hour",
+        "day": "day",
+        "daily": "day",
+        "week": "week",
+        "weekly": "week",
+        "month": "month",
+        "monthly": "month",
+        "year": "year",
+        "yearly": "year",
+        "annual": "year",
+        "annually": "year",
+    }.get(normalized)
+
+
+def _trusted_salary(value) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+
+    minimum = _first_value(
+        value, "min", "minimum", "minValue", "minAmount", "lowerBound"
+    )
+    maximum = _first_value(
+        value, "max", "maximum", "maxValue", "maxAmount", "upperBound"
+    )
+    currency = _first_value(value, "currency", "currencyCode", "currency_code")
+    period = _normalize_salary_period(
+        _first_value(value, "period", "interval", "unit", "timeUnit")
+    )
+
+    def number(candidate):
+        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+            return float(candidate)
+        return None
+
+    return {
+        "salary_min": number(minimum),
+        "salary_max": number(maximum),
+        "salary_currency": str(currency).upper() if currency else None,
+        "salary_period": period,
+    }
+
+
+def _merge_trusted_ats_facts(
+    classification: JobEnrichmentV3,
+    item: dict,
+    structured_context: dict,
+) -> None:
+    employment_type = _normalize_employment_type(
+        structured_context.get("employment_type")
+    )
+    if employment_type:
+        classification.employment_type = employment_type
+
+    workplace_type = _normalize_workplace_type(
+        structured_context.get("workplace_type")
+    )
+    if workplace_type:
+        classification.workplace_type = workplace_type
+
+    classification.locations = _merge_locations(
+        classification.locations,
+        _trusted_ats_locations(item, structured_context),
+    )
+    classification.offices = _unique_strings(
+        classification.offices + list(structured_context.get("offices") or [])
+    )
+
+    for field, value in _trusted_salary(structured_context.get("salary")).items():
+        if value is not None:
+            setattr(classification, field, value)
+
+
 
 def _build_canonical_projection(
 
@@ -1022,7 +1242,7 @@ def _build_canonical_projection(
 
             "role_track":
 
-                "unknown",
+                None,
 
 
 
@@ -1036,7 +1256,7 @@ def _build_canonical_projection(
 
             "leadership_level":
 
-                "unknown",
+                None,
 
 
 
@@ -1108,7 +1328,7 @@ def _build_canonical_projection(
 
             "education_required":
 
-                "unknown",
+                None,
 
 
 
@@ -1116,7 +1336,7 @@ def _build_canonical_projection(
 
             "education_preferred":
 
-                "unknown",
+                None,
 
 
 
@@ -1738,7 +1958,9 @@ def save_success(
 
     classification: JobEnrichmentV3,
 
-    usage: GeminiUsage | None = None,
+    usage: OpenRouterUsage | None = None,
+
+    trusted_structured_context: dict | None = None,
 
 ) -> bool:
 
@@ -1746,7 +1968,7 @@ def save_success(
 
 
 
-    usage = usage or GeminiUsage()
+    usage = usage or OpenRouterUsage()
 
 
 
@@ -1838,6 +2060,16 @@ def save_success(
 
         )
 
+        if trusted_structured_context:
+
+            data["trusted_structured_context"] = trusted_structured_context
+
+        data["_request"] = {
+            "model": usage.model,
+            "provider": usage.provider,
+            "interaction_id": usage.interaction_id,
+        }
+
 
 
         canonical = (
@@ -1880,7 +2112,10 @@ def save_success(
 
             "schema_version":
 
-                settings.ai_classification_version,
+                item.get(
+                    "queue_schema_version",
+                    settings.ai_classification_version,
+                ),
 
 
 
@@ -2254,9 +2489,9 @@ def save_success(
 
 
 
-            # Gemini usage
+            # OpenRouter usage
 
-            "gemini_interaction_id":
+            "openrouter_interaction_id":
 
                 usage.interaction_id,
 
@@ -2412,7 +2647,7 @@ def save_success(
 
 
 
-                gemini_interaction_id,
+                openrouter_interaction_id,
 
                 input_tokens,
 
@@ -2542,7 +2777,7 @@ def save_success(
 
 
 
-                %(gemini_interaction_id)s,
+                %(openrouter_interaction_id)s,
 
                 %(input_tokens)s,
 
@@ -2836,9 +3071,9 @@ def save_success(
 
 
 
-                gemini_interaction_id =
+                openrouter_interaction_id =
 
-                    EXCLUDED.gemini_interaction_id,
+                    EXCLUDED.openrouter_interaction_id,
 
 
 
@@ -2998,7 +3233,10 @@ def save_success(
 
 
 
-                settings.ai_classification_version,
+                item.get(
+                    "queue_schema_version",
+                    settings.ai_classification_version,
+                ),
 
 
 
@@ -3054,6 +3292,16 @@ def save_success(
 
 
 
+def _error_policy(error: Exception) -> tuple[bool, str]:
+    retryable = bool(
+        getattr(error, "retryable", not isinstance(error, (TypeError, ValueError)))
+    )
+    error_class = str(
+        getattr(error, "error_class", type(error).__name__)
+    )[:100]
+    return retryable, error_class
+
+
 def save_failure(
 
     conn,
@@ -3068,12 +3316,19 @@ def save_failure(
 
 
 
+    retryable, error_class = _error_policy(error)
+
     terminal = (
+        not retryable
+        or item["queue_attempts"] >= settings.ai_max_attempts
+    )
 
-        item["queue_attempts"]
-
-        >= settings.ai_max_attempts
-
+    retry_delay_seconds = min(
+        3600,
+        max(
+            30 * (2 ** max(0, item["queue_attempts"] - 1)),
+            float(getattr(error, "retry_after_seconds", 0) or 0),
+        ),
     )
 
 
@@ -3101,6 +3356,18 @@ def save_failure(
                 started_at = NULL,
 
                 last_error = %s,
+
+                error_class = %s,
+
+                retryable = %s,
+
+                next_attempt_at = CASE
+
+                    WHEN %s THEN NULL
+
+                    ELSE NOW() + (%s * INTERVAL '1 second')
+
+                END,
 
 
 
@@ -3135,6 +3402,14 @@ def save_failure(
 
 
                 error_message,
+
+                error_class,
+
+                retryable,
+
+                terminal,
+
+                retry_delay_seconds,
 
                 terminal,
 
@@ -3209,12 +3484,141 @@ def save_failure(
     return terminal
 
 
+def requeue_failed_enrichment(
+    conn,
+    *,
+    include_permanent: bool = False,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE enrichment_queue AS q
+            SET
+                status = 'pending',
+                attempts = 0,
+                started_at = NULL,
+                completed_at = NULL,
+                next_attempt_at = NOW(),
+                last_error = NULL,
+                error_class = NULL,
+                retryable = NULL
+            FROM jobs AS j
+            WHERE q.job_id = j.id
+              AND q.content_hash = j.content_hash
+              AND q.status = 'failed'
+              AND (%s OR q.retryable IS TRUE)
+              AND j.active = TRUE
+              AND j.enrichment_eligibility = 'eligible'
+            """,
+            (include_permanent,),
+        )
+        updated = cur.rowcount
+    conn.commit()
+    return updated
+
+
+def _current_job_state(
+    conn,
+    job_id: int,
+) -> dict | None:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                content_hash,
+                active,
+                enrichment_eligibility,
+                posted_at
+            FROM jobs
+            WHERE id = %s
+            """,
+            (job_id,),
+        )
+        return cur.fetchone()
+
+
+def _mark_ai_ineligible(
+    conn,
+    item: dict,
+    reason: str,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE enrichment_queue
+            SET
+                status = 'not_eligible',
+                started_at = NULL,
+                completed_at = NOW(),
+                last_error = %s
+            WHERE id = %s
+            """,
+            (reason, item["queue_id"]),
+        )
+        cur.execute(
+            """
+            UPDATE jobs
+            SET
+                classification_status = 'not_eligible',
+                classification_started_at = NULL,
+                enrichment_eligibility = 'not_eligible',
+                enrichment_eligibility_reason = %s
+            WHERE id = %s
+              AND content_hash = %s
+            """,
+            (reason, item["id"], item["queue_hash"]),
+        )
+    conn.commit()
+
+
 
 
 def process_item(
     conn,
     item: dict,
-) -> tuple[str, GeminiUsage | None]:
+    on_ai_attempt: Callable[[], None] | None = None,
+) -> tuple[str, OpenRouterUsage | None]:
+
+    current = _current_job_state(
+        conn,
+        item["id"],
+    )
+
+    if (
+        current is None
+        or current["content_hash"] != item["queue_hash"]
+    ):
+        _complete_queue(
+            conn,
+            item["queue_id"],
+            "stale_content_hash",
+        )
+        return "stale", None
+
+    runtime_eligibility, runtime_reason = (
+        determine_enrichment_eligibility(
+            current["posted_at"]
+        )
+    )
+
+    if not current["active"]:
+        _mark_ai_ineligible(
+            conn,
+            item,
+            "inactive",
+        )
+        return "not_eligible", None
+
+    if (
+        current["enrichment_eligibility"] != "eligible"
+        or runtime_eligibility != "eligible"
+    ):
+        _mark_ai_ineligible(
+            conn,
+            item,
+            runtime_reason or "not_eligible",
+        )
+        return "not_eligible", None
 
     if (
         item["content_hash"]
@@ -3234,10 +3638,11 @@ def process_item(
         provider=item["provider"],
         location=item["location"],
         raw=item["raw_payload"],
+        description=item.get("description_text"),
     )
 
 
-    if not decision.eligible:
+    if decision.scope == "non_us":
 
         _mark_non_us(
             conn,
@@ -3246,6 +3651,17 @@ def process_item(
         )
 
         return "skipped_non_us", None
+
+
+    if decision.scope == "unknown":
+
+        _defer_unknown_us_scope(
+            conn,
+            item,
+            decision.reason,
+        )
+
+        return "deferred_scope", None
 
 
     with conn.cursor() as cur:
@@ -3297,71 +3713,22 @@ def process_item(
     # multiple locations explicitly stated in the posting.
 
 
+    if on_ai_attempt is not None:
+        on_ai_attempt()
+
     result = classify_job(
         payload,
-        schema_version=(
-            get_settings()
-            .ai_classification_version
+        schema_version=item.get(
+            "queue_schema_version",
+            get_settings().ai_classification_version,
         ),
     )
 
 
-    # --------------------------------------------------------
-    # TRUST ATS EMPLOYMENT TYPE
-    # --------------------------------------------------------
-
-    employment_type = (
-        _normalize_employment_type(
-            structured_context.get(
-                "employment_type"
-            )
-        )
-    )
-
-    if employment_type:
-        result.classification.employment_type = (
-            employment_type
-        )
-
-
-    # --------------------------------------------------------
-    # TRUST ATS WORKPLACE TYPE
-    # --------------------------------------------------------
-
-    workplace_type = (
-        _normalize_workplace_type(
-            structured_context.get(
-                "workplace_type"
-            )
-        )
-    )
-
-    if workplace_type:
-        result.classification.workplace_type = (
-            workplace_type
-        )
-
-
-    # --------------------------------------------------------
-    # MERGE AI + ATS LOCATIONS
-    #
-    # AI locations are retained because the posting may name
-    # multiple locations.
-    #
-    # ATS locations are added when AI missed them.
-    # --------------------------------------------------------
-
-    ats_locations = (
-        _ashby_ats_locations(
-            item
-        )
-    )
-
-    result.classification.locations = (
-        _merge_locations(
-            result.classification.locations,
-            ats_locations,
-        )
+    _merge_trusted_ats_facts(
+        result.classification,
+        item,
+        structured_context,
     )
 
 
@@ -3398,6 +3765,7 @@ def process_item(
         item,
         result.classification,
         result.usage,
+        trusted_structured_context=structured_context,
     )
 
 
@@ -3434,7 +3802,7 @@ def run_enrichment(
     # Queue rows examined.
     processed = 0
 
-    # Actual AI classifications completed.
+    # AI classifications attempted, including provider failures.
     ai_calls = 0
 
     completed = 0
@@ -3449,6 +3817,10 @@ def run_enrichment(
     total_tokens = 0
 
     model_counts: dict[str, int] = {}
+
+    def record_ai_attempt() -> None:
+        nonlocal ai_calls
+        ai_calls += 1
 
     attempted_queue_ids: set[int] = set()
     with get_connection() as conn:
@@ -3480,12 +3852,14 @@ def run_enrichment(
                 result, usage = process_item(
                     conn,
                     item,
+                    on_ai_attempt=record_ai_attempt,
                 )
 
                 completed += int(
                     result in {
                         "completed",
                         "skipped_non_us",
+                        "not_eligible",
                     }
                 )
 
@@ -3497,12 +3871,10 @@ def run_enrichment(
                     result == "skipped_non_us"
                 )
 
-                # usage exists only when the job
-                # actually reached the AI classifier.
+                # Token usage exists only when a classification
+                # succeeded. Attempt count is reserved immediately
+                # before classify_job(), including failed calls.
                 if usage is not None:
-
-                    ai_calls += 1
-
                     input_tokens += (
                         usage.input_tokens
                     )

@@ -50,6 +50,14 @@ RELEVANT_HEADINGS = (
     "what we're looking for",
     "what we’re looking for",
     "what we are looking for",
+    "who we're looking for",
+    "who we’re looking for",
+    "who you are",
+    "what you bring",
+    "what you'll bring",
+    "what you’ll bring",
+    "your qualifications",
+    "you have",
     "requirements",
     "minimum requirements",
     "minimum qualifications",
@@ -619,7 +627,7 @@ def build_classifier_payload(
     row: dict[str, Any],
 ) -> dict:
     """
-    Build the smallest useful semantic payload for Gemini.
+    Build the smallest useful semantic payload for the classifier.
 
     Structured ATS facts are added separately by worker.py as
     trusted_structured_context, so they are intentionally not

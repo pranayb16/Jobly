@@ -1,3 +1,5 @@
+import { connection } from 'next/server';
+
 export type CountItem = { name: string; count: number };
 
 export type CompanySnapshot = {
@@ -68,19 +70,31 @@ export type Trends = {
   top_skills?: CountItem[] | null;
 };
 
+export class IntelligenceApiError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+    this.name = 'IntelligenceApiError';
+  }
+}
+
 const apiBase = (process.env.JOBS_API_URL ?? 'http://localhost:8000').replace(/\/$/, '');
 
 export async function getIntelligence<T>(path: string): Promise<T | null> {
+  await connection();
   try {
     const response = await fetch(`${apiBase}${path}`, {
       cache: 'no-store',
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(8_000),
     });
-    if (!response.ok) return null;
-    return await response.json() as T;
-  } catch {
-    return null;
+    if (response.status === 404) return null;
+    if (!response.ok) throw new IntelligenceApiError(`Intelligence API returned ${response.status}`, response.status);
+    const data: unknown = await response.json();
+    if (!data || typeof data !== 'object') throw new IntelligenceApiError('Intelligence API returned malformed data');
+    return data as T;
+  } catch (error) {
+    if (error instanceof IntelligenceApiError) throw error;
+    throw new IntelligenceApiError(error instanceof Error ? error.message : 'Intelligence API unavailable');
   }
 }
 

@@ -13,8 +13,10 @@ export type Job = {
   salaryMin: number | null;
   salaryMax: number | null;
   salaryCurrency: string;
+  salaryPeriod: string;
 
   createdAt: string | null;
+  dateSource: 'posted' | 'observed' | null;
 
   provider: string;
 

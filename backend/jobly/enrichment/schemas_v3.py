@@ -125,18 +125,6 @@ WorkplaceType = Literal[
 ]
 
 
-RemoteScope = Literal[
-    "global",
-    "country",
-    "region",
-    "state",
-    "city",
-    "time_zone",
-    "not_remote",
-    "unknown",
-]
-
-
 EmploymentType = Literal[
     "full_time",
     "part_time",
@@ -170,29 +158,29 @@ class EnrichedLocationV3(BaseModel):
         extra="forbid"
     )
 
-    city: str | None = None
+    city: str | None
     # Example: "Austin"
 
-    state: str | None = None
+    state: str | None
     # Example: "Texas"
 
-    state_code: str | None = None
+    state_code: str | None
     # Example: "TX"
 
-    country: str | None = None
+    country: str | None
     # Example: "United States"
 
-    country_code: str | None = None
+    country_code: str | None
     # Example: "US"
 
 
 class JobEnrichmentV3(BaseModel):
     """
-    Compact semantic enrichment.
+    Compact semantic enrichment with an explicit absence contract.
 
-    All fields except confidence are optional so Gemini can omit
-    unsupported dimensions instead of spending output tokens on
-    nulls, "unknown" values, and empty arrays.
+    Every top-level key is required. Nullable fields use null and
+    collection fields use an explicit empty list when the posting
+    contains no supported evidence for that dimension.
     """
 
     model_config = ConfigDict(
@@ -203,13 +191,13 @@ class JobEnrichmentV3(BaseModel):
     # ROLE
     # ========================================================
 
-    standardized_title: str | None = None
+    standardized_title: str | None
     # Example: "Senior Backend Engineer"
 
-    job_family: str | None = None
+    job_family: str | None
     # Example: "software_engineering"
 
-    job_subfamily: str | None = None
+    job_subfamily: str | None
     # Example: "backend_engineering"
 
     # related_roles: list[str] = Field(
@@ -218,7 +206,7 @@ class JobEnrichmentV3(BaseModel):
     # Example:
     # ["Backend Engineer", "Platform Engineer"]
 
-    seniority: Seniority = "unknown"
+    seniority: Seniority
     # Example: "senior"
 
 
@@ -226,11 +214,7 @@ class JobEnrichmentV3(BaseModel):
     # SKILLS
     # ========================================================
 
-    skills: list[
-        SkillEntry
-    ] = Field(
-        default_factory=list
-    )
+    skills: list[SkillEntry]
     # Example:
     # {
     #     "Python": "required",
@@ -239,9 +223,7 @@ class JobEnrichmentV3(BaseModel):
     #     "Kubernetes": "mentioned"
     # }
 
-    domain_tags: list[str] = Field(
-        default_factory=list
-    )
+    domain_tags: list[str]
     # Example:
     # ["fintech", "payments"]
 
@@ -251,7 +233,7 @@ class JobEnrichmentV3(BaseModel):
     # ========================================================
 
     years_experience_min: int | None = Field(
-        default=None,
+        ...,
         ge=0,
         le=80,
     )
@@ -259,7 +241,7 @@ class JobEnrichmentV3(BaseModel):
     # "3+ years experience" -> 3
 
     years_experience_max: int | None = Field(
-        default=None,
+        ...,
         ge=0,
         le=80,
     )
@@ -271,20 +253,14 @@ class JobEnrichmentV3(BaseModel):
     # EDUCATION
     # ========================================================
 
-    education_level: EducationLevel = "unknown"
+    education_level: EducationLevel
     # Example: "bachelor"
 
-    education_fields: list[str] = Field(
-        default_factory=list
-    )
+    education_fields: list[str]
     # Example:
     # ["Computer Science", "Engineering"]
 
-    certifications: list[
-        CertificationEntry
-    ] = Field(
-        default_factory=list
-    )
+    certifications: list[CertificationEntry]
     # Example:
     # {
     #     "CPA": "required",
@@ -296,11 +272,7 @@ class JobEnrichmentV3(BaseModel):
     # LOCATION / WORK ARRANGEMENT
     # ========================================================
 
-    locations: list[
-        EnrichedLocationV3
-    ] = Field(
-        default_factory=list
-    )
+    locations: list[EnrichedLocationV3]
     # Example:
     # [
     #     {
@@ -312,7 +284,7 @@ class JobEnrichmentV3(BaseModel):
     #     }
     # ]
 
-    workplace_type: WorkplaceType = "unknown"
+    workplace_type: WorkplaceType
     # Example: "hybrid"
 
     # remote_scope: RemoteScope = "unknown"
@@ -326,10 +298,10 @@ class JobEnrichmentV3(BaseModel):
     # EMPLOYMENT
     # ========================================================
 
-    employment_type: EmploymentType = "unknown"
+    employment_type: EmploymentType
     # Example: "full_time"
 
-    contract_duration: str | None = None
+    contract_duration: str | None
     # Example: "12 months"
 
 
@@ -338,21 +310,21 @@ class JobEnrichmentV3(BaseModel):
     # ========================================================
 
     salary_min: float | None = Field(
-        default=None,
+        ...,
         ge=0,
     )
     # Example: 120000
 
     salary_max: float | None = Field(
-        default=None,
+        ...,
         ge=0,
     )
     # Example: 160000
 
-    salary_currency: str | None = None
+    salary_currency: str | None
     # Example: "USD"
 
-    salary_period: SalaryPeriod = "unknown"
+    salary_period: SalaryPeriod
     # Example: "year"
 
     # salary_text: str | None = None
@@ -387,19 +359,19 @@ class JobEnrichmentV3(BaseModel):
     # VISA / AUTHORIZATION / SECURITY
     # ========================================================
 
-    visa_sponsorship: VisaSponsorship = "unknown"
+    visa_sponsorship: VisaSponsorship
     # Example: "available"
 
-    work_authorization_required: bool | None = None
+    work_authorization_required: bool | None
     # Example: True
 
-    citizenship_requirement: str | None = None
+    citizenship_requirement: str | None
     # Example: "U.S. citizen"
 
-    security_clearance_required: bool | None = None
+    security_clearance_required: bool | None
     # Example: True
 
-    security_clearance_level: str | None = None
+    security_clearance_level: str | None
     # Example: "TS/SCI"
 
 
@@ -407,9 +379,7 @@ class JobEnrichmentV3(BaseModel):
     # ORGANIZATION
     # ========================================================
 
-    offices: list[str] = Field(
-        default_factory=list
-    )
+    offices: list[str]
     # Example:
     # ["Austin", "New York"]
 
@@ -485,6 +455,32 @@ class JobEnrichmentV3(BaseModel):
                     f"{name} minimum cannot exceed maximum"
                 )
 
+        aliases = {
+            "js": "JavaScript",
+            "javascript": "JavaScript",
+            "nodejs": "Node.js",
+            "node.js": "Node.js",
+            "postgres": "PostgreSQL",
+            "postgresql": "PostgreSQL",
+        }
+        rank = {"mentioned": 0, "preferred": 1, "required": 2}
+        merged: dict[str, SkillEntry] = {}
+        for skill in self.skills:
+            canonical = aliases.get(skill.name.casefold(), skill.name)
+            key = "".join(character for character in canonical.casefold() if character.isalnum())
+            existing = merged.get(key)
+            if existing is None or rank[skill.requirement] > rank[existing.requirement]:
+                merged[key] = SkillEntry(name=canonical, requirement=skill.requirement)
+        self.skills = list(merged.values())
+
+        certification_rank = {"preferred": 0, "required": 1}
+        certifications: dict[str, CertificationEntry] = {}
+        for certification in self.certifications:
+            key = " ".join(certification.name.casefold().split())
+            existing = certifications.get(key)
+            if existing is None or certification_rank[certification.requirement] > certification_rank[existing.requirement]:
+                certifications[key] = certification
+        self.certifications = list(certifications.values())
         return self
 
 

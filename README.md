@@ -16,12 +16,12 @@ Cloud Scheduler (once/day)
        -> jobs (current state)
        -> job_versions + job_events (history)
        -> enrichment_queue (new/changed first)
-  -> bounded Gemini v2 enrichment -> job_enrichments.data
+  -> bounded OpenRouter v3 enrichment -> job_enrichments.data
   -> company_daily_snapshots
   -> deterministic intelligence API -> Next.js intelligence routes
 ```
 
-The crawler never calls Gemini. A remaining enrichment backlog is recorded but does not
+The crawler never calls OpenRouter. A remaining enrichment backlog is recorded but does not
 fail ingestion or snapshot generation.
 
 ## Repository layout
@@ -29,7 +29,7 @@ fail ingestion or snapshot generation.
 ```text
 backend/jobly/companies/      canonical company identity and conservative linking
 backend/jobly/products/jobs/ optional legacy job-board API
-backend/jobly/enrichment/     deterministic extraction, v1/v2 schemas, queue worker
+backend/jobly/enrichment/     deterministic extraction, versioned schemas, queue worker
 backend/jobly/intelligence/   daily snapshots and deterministic trend queries
 backend/jobly/pipeline/       pipeline-run persistence
 frontend/app/                 intelligence routes plus the existing /jobs experience
@@ -60,12 +60,15 @@ cp .env.local.example .env.local
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string | none |
 | `FRONTEND_ORIGIN` | Allowed browser origin | `http://localhost:3000` |
-| `GEMINI_API_KEY` | Required only by the enrichment worker | none |
-| `AI_MODEL` | Gemini model identifier | `gemini-3.5-flash-lite` |
-| `AI_CLASSIFICATION_VERSION` | Rich output schema version | `v2` |
-| `AI_PROMPT_VERSION` | Persisted prompt version | `v2` |
+| `ADMIN_API_TOKEN` | Bearer token required by `/api/admin/runs*` | none; admin API fails closed |
+| `OPENROUTER_API_KEY` | Required only by the enrichment worker | none |
+| `OPENROUTER_FREE_MODEL` | Free-first OpenRouter model | `openai/gpt-oss-20b:free` |
+| `OPENROUTER_PAID_MODEL` | Paid fallback OpenRouter model | `openai/gpt-oss-20b` |
+| `OPENROUTER_PAID_PROVIDERS` | Ordered paid-provider allowlist | `coreweave,deepinfra,akashml` |
+| `AI_CLASSIFICATION_VERSION` | Rich output schema version | `v3` |
+| `AI_PROMPT_VERSION` | Persisted prompt version | `v3` |
 | `AI_MAX_ATTEMPTS` | Queue retries before terminal failure | `5` |
-| `AI_ENRICHMENT_LIMIT` | Maximum queue items processed per pipeline run | `5000` |
+| `AI_ENRICHMENT_LIMIT` | Maximum AI classification attempts per pipeline run | `5000` |
 | `SOURCE_TARGET_COUNT` | Desired active validated source inventory | `1000` |
 | `CRAWL_SOURCE_LIMIT` | Optional development/debug crawl cap | blank (all active sources) |
 | `APP_ENV` | Environment label | `development` |
@@ -106,7 +109,7 @@ python -m jobly.commands.enrich --limit 5000
 python -m jobly.commands.snapshot
 ```
 
-`bootstrap_enrichment` is idempotent and does not call Gemini. New and changed jobs
+`bootstrap_enrichment` is idempotent and does not call OpenRouter. New and changed jobs
 already have priorities 1 and 2; existing backlog receives priority 3.
 
 ## Daily pipeline

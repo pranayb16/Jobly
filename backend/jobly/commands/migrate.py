@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 from pathlib import Path
 
 from jobly.db.connection import get_connection
@@ -6,6 +7,10 @@ from jobly.logging_config import configure_logging
 
 
 DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
+
+
+def migration_checksum(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def run_migrations(directory: Path) -> None:
@@ -18,23 +23,38 @@ def run_migrations(directory: Path) -> None:
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     filename TEXT PRIMARY KEY,
-                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    checksum TEXT
                 )
                 """
             )
+            cur.execute("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT")
         conn.commit()
         for migration_file in migration_files:
             with conn.cursor() as cur:
+                checksum = migration_checksum(migration_file)
                 cur.execute(
-                    "SELECT 1 FROM schema_migrations WHERE filename = %s",
+                    "SELECT checksum FROM schema_migrations WHERE filename = %s",
                     (migration_file.name,),
                 )
-                if cur.fetchone() is not None:
+                applied = cur.fetchone()
+                if applied is not None:
+                    existing = applied[0]
+                    if existing is None:
+                        cur.execute(
+                            "UPDATE schema_migrations SET checksum = %s WHERE filename = %s",
+                            (checksum, migration_file.name),
+                        )
+                        conn.commit()
+                    elif existing != checksum:
+                        raise RuntimeError(
+                            f"Migration checksum mismatch for {migration_file.name}"
+                        )
                     continue
                 cur.execute(migration_file.read_text(encoding="utf-8"))
                 cur.execute(
-                    "INSERT INTO schema_migrations (filename) VALUES (%s)",
-                    (migration_file.name,),
+                    "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
+                    (migration_file.name, checksum),
                 )
             conn.commit()
             print(f"Applied {migration_file.name}")

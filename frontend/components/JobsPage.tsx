@@ -17,7 +17,6 @@ import type { ActiveFilterGroup, FilterDefinition, FilterKey, Filters, Sort } fr
 
 const defaults = (): Filters => ({ datePosted: [], location: [], workplace: [], role: [], experience: [], employment: [], skill: [], company: [], source: [] });
 const filterLabels: Record<FilterKey, string> = { datePosted: 'Date posted', location: 'Location', workplace: 'Workplace', role: 'Role', experience: 'Experience', employment: 'Job type', skill: 'Skills', company: 'Company', source: 'Source' };
-const JOBS_POLL_INTERVAL_MS = 60_000;
 const storageKey = (kind: string) => `jobly:${kind}`;
 const readIds = (kind: string) => { try { return new Set<string>(JSON.parse(localStorage.getItem(storageKey(kind)) || '[]')); } catch { return new Set<string>(); } };
 const readInitialFilters = (params: URLSearchParams): Filters => {
@@ -38,7 +37,8 @@ const readInitialFilters = (params: URLSearchParams): Filters => {
 
 const experienceMatch = (job: Job, value: string) => {
   if (value.startsWith('seniority:')) return job.seniority === value.slice(10);
-  const years = job.yearsExperienceMin ?? 0;
+  const years = job.yearsExperienceMin;
+  if (years === null) return false;
   return value === 'years:entry' ? years <= 2 : value === 'years:mid' ? years >= 3 && years <= 5 : years >= 6;
 };
 
@@ -77,14 +77,9 @@ export default function JobsPage() {
 
   useEffect(() => {
     let disposed = false;
-    let hasLoaded = false;
-    let activeRequest: AbortController | null = null;
+    const controller = new AbortController();
 
-    const refreshJobs = async () => {
-      if (activeRequest) return;
-      const controller = new AbortController();
-      activeRequest = controller;
-
+    const loadJobs = async () => {
       try {
         const response = await fetch('/api/jobs', { cache: 'no-store', signal: controller.signal });
         if (!response.ok) throw new Error((await response.json()).message || 'Unable to load jobs');
@@ -93,28 +88,18 @@ export default function JobsPage() {
         setJobs(data.jobs);
         setError('');
         setStatus('ready');
-        hasLoaded = true;
       } catch (reason) {
         if (disposed || (reason instanceof DOMException && reason.name === 'AbortError')) return;
-        if (!hasLoaded) {
-          setError(reason instanceof Error ? reason.message : 'Unable to load jobs');
-          setStatus('error');
-        }
-      } finally {
-        if (activeRequest === controller) activeRequest = null;
+        setError(reason instanceof Error ? reason.message : 'Unable to load jobs');
+        setStatus('error');
       }
     };
 
-    const refreshWhenVisible = () => { if (document.visibilityState === 'visible') void refreshJobs(); };
-    void refreshJobs();
-    const poll = window.setInterval(() => void refreshJobs(), JOBS_POLL_INTERVAL_MS);
-    document.addEventListener('visibilitychange', refreshWhenVisible);
+    void loadJobs();
 
     return () => {
       disposed = true;
-      window.clearInterval(poll);
-      document.removeEventListener('visibilitychange', refreshWhenVisible);
-      activeRequest?.abort();
+      controller.abort();
     };
   }, []);
 
@@ -142,7 +127,7 @@ export default function JobsPage() {
     const skillLabels = new Map<string, string>();
     arrayValues(jobs, 'skills').forEach((skill) => { const key = skill.toLocaleLowerCase(); if (!skillLabels.has(key)) skillLabels.set(key, skill); });
     return [
-      { key: 'datePosted', label: 'Date posted', single: true, options: [option('24', 'Last 24 hours', (job) => hoursOld(job.createdAt) <= 24), option('48', 'Last 48 hours', (job) => hoursOld(job.createdAt) <= 48)] },
+      { key: 'datePosted', label: 'Date posted', single: true, options: [option('24', 'Last 24 hours', (job) => job.dateSource === 'posted' && hoursOld(job.createdAt) <= 24), option('48', 'Last 48 hours', (job) => job.dateSource === 'posted' && hoursOld(job.createdAt) <= 48)] },
       { key: 'location', label: 'Location', searchable: true, options: allLocations(jobs).map((value) => option(value, value, (job) => jobLocations(job).includes(value))) },
       { key: 'workplace', label: 'Workplace', options: values(jobs, 'workplaceType').map((value) => option(value, label(value), (job) => job.workplaceType === value)) },
       { key: 'role', label: 'Role', searchable: true, options: [...values(jobs, 'jobFamily').map((value) => option(`family:${value}`, value, (job) => job.jobFamily === value)), ...values(jobs, 'jobSubfamily').map((value) => option(`subfamily:${value}`, value, (job) => job.jobSubfamily === value))] },
@@ -162,7 +147,7 @@ export default function JobsPage() {
     return !hidden.has(id) && (!savedOnly || saved.has(id))
       && (!needle || [job.title, job.company, job.description, job.jobFamily, job.jobSubfamily, ...job.skills, ...job.relatedRoles].some((value) => value.toLowerCase().includes(needle)))
       && (!place || jobLocations(job).some((value) => value.toLowerCase().includes(place)))
-      && matches('datePosted', (value) => hoursOld(job.createdAt) <= Number(value))
+      && matches('datePosted', (value) => job.dateSource === 'posted' && hoursOld(job.createdAt) <= Number(value))
       && matches('location', (value) => jobLocations(job).includes(value))
       && matches('workplace', (value) => job.workplaceType === value)
       && matches('role', (value) => value.startsWith('family:') ? job.jobFamily === value.slice(7) : job.jobSubfamily === value.slice(10))

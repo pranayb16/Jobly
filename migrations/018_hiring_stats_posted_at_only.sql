@@ -296,6 +296,7 @@ BEGIN
 
         LEFT JOIN jobs AS j
             ON j.company_id = c.id
+           AND j.is_us_job IS TRUE
 
 
         WHERE

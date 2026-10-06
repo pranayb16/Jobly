@@ -38,10 +38,11 @@ def test_snapshot_uses_canonical_skills_and_locations():
             "job_family":
                 "software_engineering",
 
-            "skills": [
+            "required_skills": [
                 "Python",
-                "PostgreSQL",
             ],
+            "preferred_skills": ["PostgreSQL"],
+            "skills": ["Python", "PostgreSQL", "Communication"],
 
             "seniority":
                 "senior",
@@ -110,6 +111,14 @@ def test_snapshot_uses_canonical_skills_and_locations():
     }
 
 
+def test_snapshot_publication_is_atomic_and_demand_taxonomy_is_consistent():
+    source = open("jobly/intelligence/snapshots.py", encoding="utf-8").read()
+    assert source.count("conn.commit()") == 1
+    assert 'role = data.get("standardized_title")' in source
+    assert 'data.get("required_skills")' in source
+    assert 'data.get("preferred_skills")' in source
+
+
 def test_snapshot_migration_and_upsert_are_idempotent():
     migration = open(
         "../migrations/010_company_snapshots.sql",
@@ -149,3 +158,17 @@ def test_snapshot_migration_and_upsert_are_idempotent():
         "DO UPDATE SET"
         in normalized_source
     )
+
+
+def test_company_intelligence_uses_only_confirmed_us_jobs():
+    snapshot_source = open(
+        "jobly/intelligence/snapshots.py",
+        encoding="utf-8",
+    ).read()
+    hiring_stats_migration = open(
+        "../migrations/018_hiring_stats_posted_at_only.sql",
+        encoding="utf-8",
+    ).read()
+
+    assert snapshot_source.count("is_us_job IS TRUE") >= 3
+    assert "AND j.is_us_job IS TRUE" in hiring_stats_migration

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -77,12 +79,13 @@ def get_jobs(
     limit: int = Query(
         default=20,
         ge=1,
-        le=100,
+        le=5000,
     ),
     offset: int = Query(
         default=0,
         ge=0,
     ),
+    posted_since: datetime | None = Query(default=None),
 ) -> JobsResponse:
 
     with (
@@ -105,7 +108,9 @@ def get_jobs(
                 """
                 SELECT COUNT(*) AS total
                 FROM public_jobs
-                """
+                WHERE (%s::timestamptz IS NULL OR posted_at >= %s)
+                """,
+                (posted_since, posted_since),
             )
 
             total = (
@@ -122,6 +127,8 @@ def get_jobs(
                 JOIN current_job_intelligence AS cji
                   ON cji.job_id = public.id
 
+                WHERE (%s::timestamptz IS NULL OR cji.posted_at >= %s)
+
                 ORDER BY
                     COALESCE(
                         cji.posted_at,
@@ -133,6 +140,8 @@ def get_jobs(
                 OFFSET %s
                 """,
                 (
+                    posted_since,
+                    posted_since,
                     limit,
                     offset,
                 ),

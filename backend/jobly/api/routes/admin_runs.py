@@ -1,11 +1,45 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+import secrets
+from typing import Annotated
 
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from jobly.config import get_settings
 from jobly.db.pool import get_pool
 
 
-router = APIRouter(prefix="/api/admin/runs", tags=["admin-runs"])
+_bearer = HTTPBearer(auto_error=False)
+
+
+def require_admin_access(
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Depends(_bearer),
+    ],
+) -> None:
+    expected = get_settings().admin_api_token
+    supplied = credentials.credentials if credentials is not None else ""
+
+    if (
+        not expected
+        or credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not secrets.compare_digest(supplied, expected)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing admin credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+router = APIRouter(
+    prefix="/api/admin/runs",
+    tags=["admin-runs"],
+    dependencies=[Depends(require_admin_access)],
+)
 
 
 RUN_COLUMNS = """

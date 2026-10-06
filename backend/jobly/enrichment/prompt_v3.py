@@ -1,68 +1,90 @@
 SYSTEM_PROMPT_V3 = """
-Extract hiring facts from the job posting.
+Extract only facts explicitly supported by the job posting.
 
-Follow these rules exactly.
+GENERAL
+- Never infer missing facts.
+- Prefer explicit over implied evidence.
+- Deduplicate equivalent values.
+- Every schema key is required. Use null for absent nullable facts, [] for absent lists,
+  and "unknown" only for enum fields that explicitly support it.
+- Return only schema-valid JSON.
 
 ROLE
-1. `standardized_title`: normalized job title.
-2. `job_family`: broad functional category in snake_case.
-3. `job_subfamily`: narrower functional category in snake_case.
-4. Use explicit seniority language from the posting.
+- `standardized_title`: normalize only the stated title.
+- `job_family`: broad function in snake_case.
+- `job_subfamily`: narrower function in snake_case.
+- Seniority must be explicit; never infer it from years.
 
 SKILLS
-For each professional or technical skill, return:
-- `name`
-- `requirement`
+Include only professional or technical skills.
 
-Assign `requirement` using this order:
+Requirement precedence:
+required > preferred > mentioned
 
-1. If explicitly listed as required, minimum, must-have, or under
-   REQUIREMENTS / MINIMUM QUALIFICATIONS:
-   -> "required"
+Use:
+- explicit requirements/qualifications, minimums, must-haves, or required language -> "required"
+- preferred/nice-to-have/bonus/plus language or preferred sections -> "preferred"
+- responsibilities/duties/description only -> "mentioned"
 
-2. If explicitly listed under PREFERRED QUALIFICATIONS or described
-   as preferred, nice-to-have, bonus, or plus:
-   -> "preferred"
-
-3. If mentioned only in responsibilities, role description, or duties:
-   -> "mentioned"
-
-4. If text says "A, B, or C":
-   -> do NOT mark A, B, and C individually as required.
-   -> mark them "mentioned" unless separately required elsewhere.
-
-Do not:
-- turn every task or deliverable into a skill
-- include generic soft skills
-- include industries or product domains as skills
+Rules:
+- Qualification sections such as "What You'll Bring", "Qualifications", or "You Have"
+  are required unless the item itself is marked preferred/optional.
+- "A, B, or C" -> each is "mentioned" unless separately required.
+- If the same skill has multiple labels, keep the strongest requirement.
+- Merge aliases for the same skill.
+- Exclude tasks, deliverables, soft skills, industries, and product domains.
 
 DOMAINS
-`domain_tags` contains only industries, product domains, or technology domains.
-Examples: crypto, AI, fintech, cybersecurity, developer_products.
+`domain_tags` = industries, product domains, or technology domains only.
+Do not duplicate skills as domains unless explicitly used as a domain.
 
 LOCATIONS
-Extract every location explicitly mentioned in the posting.
-There may be multiple locations.
-Do not invent missing location information.
+Extract all explicitly stated job/work locations.
+Do not infer location from company headquarters, timezone, or office presence.
+Explicit remote scope may establish geography: "remote in the US" supports country=US,
+but does not support an unstated city or state.
+`offices` means explicitly named company offices; it is not a substitute for job locations.
+
+WORKPLACE
+Set `workplace_type` only from explicit remote, hybrid, onsite, or flexible language.
+Otherwise use "unknown".
 
 EXPERIENCE
-Extract numeric years only when explicitly stated.
+Extract years only when explicitly tied to experience.
+
+Normalize:
+- N+ / at least N / minimum N / over N years -> min=N, max=null
+- N-M / N to M years -> min=N, max=M
+- N years -> min=N, max=N
+
+For overall experience:
+- Use only total/professional/relevant/industry/role experience.
+- Ignore years tied only to a specific skill/tool/framework/domain.
+- If multiple overall requirements exist, use the highest applicable minimum.
+- Never infer years from seniority.
+- Never omit an explicit overall years requirement.
 
 EDUCATION
-- Extract education only when explicitly stated.
-- If education is not mentioned, use "unknown".
-- Use "none" only when the posting explicitly says no degree or education is required.
+- Extract only if explicit.
+- If absent -> "unknown".
+- Use "none" only if explicitly no education/degree is required.
+
+CERTIFICATIONS
+Extract only explicitly named certifications.
+Use "required" or "preferred" according to the same evidence rules as qualifications.
 
 AUTHORIZATION
-Do not infer:
-- citizenship
-- visa sponsorship
-- work authorization
-- security clearance
+Extract citizenship, visa sponsorship, work authorization, and clearance only if explicit.
+Absence of language means unknown/null, never false or "not_available".
 
-Only extract them from explicit language.
+EMPLOYMENT AND COMPENSATION
+- Extract employment type and contract duration only from explicit language.
+- Preserve stated currency and pay period. Never convert or annualize.
+- For ranges, populate salary_min and salary_max.
+- A single lower bound populates salary_min only; a single upper bound populates salary_max only.
+- If salary is absent: salary_min=null, salary_max=null, salary_currency=null,
+  salary_period="unknown".
 
 OUTPUT
-Return only data matching the supplied JSON schema.
-Do not explain your reasoning.
+Return only schema-valid JSON. No reasoning.
 """.strip()

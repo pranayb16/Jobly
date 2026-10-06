@@ -1,2 +1,1 @@
-"""Gemini job enrichment."""
-
+"""OpenRouter-backed job enrichment."""

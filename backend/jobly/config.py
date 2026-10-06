@@ -37,9 +37,12 @@ def _ratio(name: str, default: float) -> float:
 class Settings:
     database_url: str | None
     frontend_origin: str
+    admin_api_token: str | None
     openrouter_api_key: str | None
     openrouter_free_model: str
     openrouter_paid_model: str
+    openrouter_paid_providers: tuple[str, ...]
+    openrouter_max_output_tokens: int
     ai_classification_version: str
     ai_prompt_version: str
     ai_max_attempts: int
@@ -71,6 +74,7 @@ def get_settings() -> Settings:
     return Settings(
         database_url=os.getenv("DATABASE_URL", "").strip() or None,
         frontend_origin=os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").strip(),
+        admin_api_token=os.getenv("ADMIN_API_TOKEN", "").strip() or None,
         openrouter_api_key=(
             os.getenv(
                 "OPENROUTER_API_KEY",
@@ -88,6 +92,16 @@ def get_settings() -> Settings:
             "OPENROUTER_PAID_MODEL",
             "openai/gpt-oss-20b",
         ).strip(),
+
+        openrouter_paid_providers=_csv(
+            "OPENROUTER_PAID_PROVIDERS",
+            "coreweave,deepinfra,akashml",
+        ),
+        openrouter_max_output_tokens=_positive_int(
+            "OPENROUTER_MAX_OUTPUT_TOKENS", 3000
+        ),
+
+
         ai_classification_version=os.getenv(
             "AI_CLASSIFICATION_VERSION",
             "v3",
@@ -105,4 +119,14 @@ def get_settings() -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         mass_drop_min_previous_jobs=_positive_int("CRAWL_MASS_DROP_MIN_PREVIOUS_JOBS", 20),
         mass_drop_ratio=_ratio("CRAWL_MASS_DROP_RATIO", 0.25),
+    )
+
+
+def _csv(name: str, default: str) -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+
+    return tuple(
+        item.strip().lower()
+        for item in raw.split(",")
+        if item.strip()
     )
