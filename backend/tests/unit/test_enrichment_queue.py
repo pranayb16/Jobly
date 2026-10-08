@@ -10,7 +10,9 @@ from jobly.enrichment.schemas_v2 import (
 from jobly.enrichment.worker import (
     _build_canonical_projection,
     claim_next_queue_item,
+    count_backlog,
     process_item,
+    recover_stale_queue,
     run_enrichment,
     save_success,
     save_failure,
@@ -133,7 +135,30 @@ def test_queue_claim_orders_new_then_changed_then_bootstrap():
         "j.enrichment_eligibility = 'eligible'"
         in conn.statements[0][0]
     )
-    assert "INTERVAL '7 days'" in conn.statements[0][0]
+    assert "INTERVAL '1 day'" in conn.statements[0][0]
+    assert "posted_at IS NULL" not in conn.statements[0][0]
+
+
+def test_backlog_only_counts_jobs_inside_enrichment_window():
+    conn = Connection(fetchone_values=[(4,)])
+
+    assert count_backlog(conn) == 4
+    assert "INTERVAL '1 day'" in conn.statements[0][0]
+
+
+def test_stale_recovery_expires_all_out_of_window_pending_rows():
+    conn = Connection()
+
+    recover_stale_queue(conn)
+
+    assert conn.commits == 1
+    assert len(conn.statements) == 3
+    assert "UPDATE jobs" in conn.statements[0][0]
+    assert "missing_posted_at" in conn.statements[0][0]
+    assert "INTERVAL '1 day'" in conn.statements[0][0]
+    assert "UPDATE enrichment_queue AS q" in conn.statements[1][0]
+    assert "q.content_hash" not in conn.statements[1][0]
+    assert "INTERVAL '1 day'" in conn.statements[1][0]
 
 
 def test_failed_ai_attempt_consumes_run_limit(monkeypatch):
@@ -143,6 +168,9 @@ def test_failed_ai_attempt_consumes_run_limit(monkeypatch):
 
         def __exit__(self, *_args):
             return False
+
+        def rollback(self):
+            pass
 
     items = [
         {"queue_id": 1, "id": 11},
@@ -384,7 +412,8 @@ def test_bootstrap_is_idempotent_by_conflict_rule():
     )
 
     assert "j.enrichment_eligibility = 'eligible'" in normalized_sql
-    assert "INTERVAL '7 days'" in normalized_sql
+    assert "INTERVAL '1 day'" in normalized_sql
+    assert "posted_at IS NULL" not in normalized_sql
 
 
 def test_retryable_failure_is_delayed_with_exponential_backoff():

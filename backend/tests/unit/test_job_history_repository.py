@@ -91,8 +91,11 @@ class RecordingCursor:
 def make_job(
     *,
     title="Engineer",
-    posted_at=None,
+    posted_at=...,
 ):
+    if posted_at is ...:
+        posted_at = datetime.now(UTC)
+
     return Job(
         external_job_id=
             "lever-1",
@@ -496,7 +499,7 @@ def test_removed_jobs_are_only_selected_from_active_rows():
     )
 
 
-def test_lever_job_without_posted_at_is_queued(
+def test_job_without_posted_at_is_not_queued(
     monkeypatch,
 ):
     prepare(
@@ -518,13 +521,17 @@ def test_lever_job_without_posted_at_is_queued(
         ),
     )
 
-    assert (
-        "INSERT INTO enrichment_queue"
-        in sql_text(cursor)
+    assert "INSERT INTO enrichment_queue" not in sql_text(cursor)
+    insert_params = next(
+        params
+        for statement, params in cursor.statements
+        if "INSERT INTO jobs" in statement
     )
+    assert "not_eligible" in insert_params
+    assert "missing_posted_at" in insert_params
 
 
-def test_job_older_than_seven_days_is_not_queued(
+def test_job_older_than_one_day_is_not_queued(
     monkeypatch,
 ):
     prepare(monkeypatch)
@@ -537,7 +544,7 @@ def test_job_older_than_seven_days_is_not_queued(
         2,
         now - timedelta(days=1),
         now,
-        make_job(posted_at=now - timedelta(days=8)),
+        make_job(posted_at=now - timedelta(days=2)),
     )
 
     assert "INSERT INTO enrichment_queue" not in sql_text(cursor)
@@ -547,24 +554,28 @@ def test_job_older_than_seven_days_is_not_queued(
         if "INSERT INTO jobs" in statement
     )
     assert "not_eligible" in insert_params
-    assert "older_than_7_days" in insert_params
+    assert "older_than_1_day" in insert_params
 
 
 def test_enrichment_window_boundary_and_non_us_precedence():
     now = datetime(2026, 10, 6, tzinfo=UTC)
 
     assert determine_enrichment_eligibility(
-        now - timedelta(days=6, hours=23),
+        now - timedelta(hours=23),
         now=now,
     ) == ("eligible", None)
     assert determine_enrichment_eligibility(
-        now - timedelta(days=8),
+        now - timedelta(days=1),
         now=now,
-    ) == ("not_eligible", "older_than_7_days")
+    ) == ("eligible", None)
+    assert determine_enrichment_eligibility(
+        now - timedelta(days=1, seconds=1),
+        now=now,
+    ) == ("not_eligible", "older_than_1_day")
     assert determine_enrichment_eligibility(
         None,
         now=now,
-    ) == ("eligible", None)
+    ) == ("not_eligible", "missing_posted_at")
     assert determine_enrichment_eligibility(
         now,
         is_us_job=False,

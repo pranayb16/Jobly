@@ -47,10 +47,7 @@ def enqueue_bootstrap(
 
               AND j.enrichment_eligibility = 'eligible'
 
-              AND (
-                  j.posted_at IS NULL
-                  OR j.posted_at >= NOW() - INTERVAL '7 days'
-              )
+              AND j.posted_at >= NOW() - INTERVAL '1 day'
 
               -- Do not repeatedly enrich jobs already known to
               -- be outside the U.S. market.

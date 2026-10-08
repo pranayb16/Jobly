@@ -94,19 +94,36 @@ candidates. The legacy `jobs.company`, v1 columns, and `public_jobs` view remain
 
 ## First production bootstrap
 
-CSV files are one-time import inputs only. Production source reconciliation reads
-`source_candidates` from PostgreSQL.
+CSV and Parquet files are one-time import inputs only. The importer normalizes and
+deduplicates both datasets by `(provider, source_slug)`. Every normalized record is
+stored in both `source_candidates` and the `sources` inventory. New inventory rows use
+the `not_verified` status; existing `active` and `inactive` statuses are preserved.
+Only providers in `SUPPORTED_PROVIDERS` with a usable URL can be validated and changed
+to `active`, and the crawler continues to select only `active` sources.
 
 ```bash
 cd backend
 python -m jobly.commands.migrate
 python -m jobly.commands.import_source_candidates \
-  --input ../data/cleaned/valid_sources.csv
+  --sources-csv '../data/cleaned/jobly_source_candidates(1).csv' \
+  --companies-parquet ../data/companies.parquet
 python -m jobly.commands.sync_sources --target 1000
 python -m jobly.commands.crawl
 python -m jobly.commands.bootstrap_enrichment
 python -m jobly.commands.enrich --limit 5000
 python -m jobly.commands.snapshot
+```
+
+Use `--dry-run` to inspect combined counts and provider coverage without writing to
+PostgreSQL. The legacy `--input <csv>` option remains available for CSV-only imports.
+
+Additional raw ATS URL inventories can be loaded directly into `sources`; new rows are
+tagged `not_verified`, while matching `active` or `inactive` rows keep their status:
+
+```bash
+cd backend
+python -m jobly.commands.import_ats_career_page_urls \
+  --input ../data/raw/ats_career_page_urls.csv
 ```
 
 `bootstrap_enrichment` is idempotent and does not call OpenRouter. New and changed jobs

@@ -117,6 +117,48 @@ def recover_stale_queue(
     with conn.cursor() as cur:
 
         cur.execute(
+            """
+            UPDATE jobs
+            SET
+                enrichment_eligibility = 'not_eligible',
+                enrichment_eligibility_reason = CASE
+                    WHEN posted_at IS NULL THEN 'missing_posted_at'
+                    ELSE 'older_than_1_day'
+                END,
+                classification_status = CASE
+                    WHEN classification_status IN ('pending', 'processing')
+                        THEN 'not_eligible'
+                    ELSE classification_status
+                END,
+                classification_started_at = NULL
+            WHERE (posted_at IS NULL OR posted_at < NOW() - INTERVAL '1 day')
+              AND (
+                  enrichment_eligibility = 'eligible'
+                  OR classification_status IN ('pending', 'processing')
+              )
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE enrichment_queue AS q
+            SET
+                status = 'not_eligible',
+                started_at = NULL,
+                completed_at = NOW(),
+                next_attempt_at = NULL,
+                last_error = CASE
+                    WHEN j.posted_at IS NULL THEN 'missing_posted_at'
+                    ELSE 'older_than_1_day'
+                END
+            FROM jobs AS j
+            WHERE q.job_id = j.id
+              AND q.status IN ('pending', 'processing')
+              AND (j.posted_at IS NULL OR j.posted_at < NOW() - INTERVAL '1 day')
+            """
+        )
+
+        cur.execute(
 
             """
 
@@ -206,6 +248,7 @@ def count_backlog(
               AND (q.next_attempt_at IS NULL OR q.next_attempt_at <= NOW())
               AND j.active = TRUE
               AND j.enrichment_eligibility = 'eligible'
+              AND j.posted_at >= NOW() - INTERVAL '1 day'
 
             """,
             (
@@ -259,10 +302,7 @@ def claim_next_queue_item(
                   AND (q.next_attempt_at IS NULL OR q.next_attempt_at <= NOW())
                   AND j.active = TRUE
                   AND j.enrichment_eligibility = 'eligible'
-                  AND (
-                      j.posted_at IS NULL
-                      OR j.posted_at >= NOW() - INTERVAL '7 days'
-                  )
+                  AND j.posted_at >= NOW() - INTERVAL '1 day'
                   AND NOT (
                       q.id = ANY(%s::bigint[])
                   )
@@ -308,10 +348,7 @@ def claim_next_queue_item(
                   AND (q.next_attempt_at IS NULL OR q.next_attempt_at <= NOW())
                   AND j.active = TRUE
                   AND j.enrichment_eligibility = 'eligible'
-                  AND (
-                      j.posted_at IS NULL
-                      OR j.posted_at >= NOW() - INTERVAL '7 days'
-                  )
+                  AND j.posted_at >= NOW() - INTERVAL '1 day'
 
                 ORDER BY
                     q.priority ASC,
@@ -2165,7 +2202,7 @@ def save_success(
 
             "related_roles":
 
-                [],
+                Jsonb(canonical["related_roles"]),
 
 
 
@@ -3509,6 +3546,7 @@ def requeue_failed_enrichment(
               AND (%s OR q.retryable IS TRUE)
               AND j.active = TRUE
               AND j.enrichment_eligibility = 'eligible'
+              AND j.posted_at >= NOW() - INTERVAL '1 day'
             """,
             (include_permanent,),
         )
@@ -3918,6 +3956,8 @@ def run_enrichment(
                     item["queue_id"],
                     item["id"],
                 )
+
+                conn.rollback()
 
                 save_failure(
                     conn,

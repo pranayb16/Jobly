@@ -24,7 +24,7 @@ class JobSaveResult:
     baseline: bool = False
 
 
-ENRICHMENT_WINDOW = timedelta(days=7)
+ENRICHMENT_WINDOW = timedelta(days=1)
 
 
 def determine_enrichment_eligibility(
@@ -37,7 +37,7 @@ def determine_enrichment_eligibility(
         return "not_eligible", "non_us"
 
     if posted_at is None:
-        return "eligible", None
+        return "not_eligible", "missing_posted_at"
 
     if posted_at.tzinfo is None:
         posted_at = posted_at.replace(tzinfo=UTC)
@@ -47,7 +47,7 @@ def determine_enrichment_eligibility(
         current_time = current_time.replace(tzinfo=UTC)
 
     if posted_at < current_time - ENRICHMENT_WINDOW:
-        return "not_eligible", "older_than_7_days"
+        return "not_eligible", "older_than_1_day"
 
     return "eligible", None
 
